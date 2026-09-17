@@ -2,7 +2,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import {
   ArrowRight,
+  BookOpen,
   Check,
+  ChevronRight,
   CircleHelp,
   Download,
   Eraser,
@@ -10,6 +12,7 @@ import {
   EyeOff,
   FileImage,
   FilePlus2,
+  Files,
   FileText,
   Grid3X3,
   ImageUp,
@@ -18,6 +21,7 @@ import {
   LocateFixed,
   Maximize2,
   MousePointer2,
+  PencilRuler,
   RefreshCw,
   RotateCcw,
   ScanSearch,
@@ -52,10 +56,14 @@ type ConversionMode = "edges" | "filled";
 type PageKind = "overall" | "structure" | "focus" | "manual";
 type Crop = { x: number; y: number; width: number; height: number; rotation: number };
 type FocusCandidate = { id: string; label: string; crop: Crop; score: number };
-type SourceInput = { source: string; label: string };
+type SourceInput = { source: string; label: string; documentId?: string; documentName?: string; documentOrder?: number; pdfPageNumber?: number; candidateIds?: string[] };
 type TextRegion = { x: number; y: number; width: number; height: number };
+type BatchDocument = { id: string; name: string; order: number; candidateCount: number; selectedCount: number; status: "queued" | "analyzing" | "ready" | "error"; error?: string };
 type PdfFigureCandidate = {
   id: string;
+  documentId: string;
+  documentName: string;
+  documentOrder: number;
   source: string;
   label: string;
   pageNumber: number;
@@ -65,6 +73,7 @@ type PdfFigureCandidate = {
   pagePreview: string;
   detection: "native" | "ocr" | "none";
 };
+type LearningFlowEntry = { id: string; documentId: string; documentName: string; documentOrder: number; pageNumber: number; label: string; source: string; candidateIds: string[]; pageIds: string[]; description: string };
 type SourceSet = SourceInput & {
   id: string;
   aspect: number;
@@ -86,6 +95,11 @@ type WorkspaceSnapshot = {
   pages: TactilePage[];
   sourceSets: SourceSet[];
   selectedId: string;
+  pdfCandidates: PdfFigureCandidate[];
+  batchDocuments: BatchDocument[];
+  learningFlow: LearningFlowEntry[];
+  reviewFileName: string;
+  showTextOverlay: boolean;
 };
 
 type TemporaryDraft = {
@@ -99,6 +113,8 @@ type TemporaryDraft = {
   pdfCandidates: PdfFigureCandidate[];
   reviewFileName: string;
   showTextOverlay?: boolean;
+  batchDocuments?: BatchDocument[];
+  learningFlow?: LearningFlowEntry[];
 };
 
 const DRAFT_DATABASE = "tactile-dtms-studio";
@@ -165,6 +181,33 @@ function copySourceSet(sourceSet: SourceSet): SourceSet {
 
 function copyPage(page: TactilePage): TactilePage {
   return { ...page, grid: cloneGrid(page.grid), crop: page.crop ? { ...page.crop } : undefined };
+}
+
+function copyCandidate(candidate: PdfFigureCandidate): PdfFigureCandidate {
+  return { ...candidate, crop: { ...candidate.crop }, textRegions: candidate.textRegions.map((region) => ({ ...region })) };
+}
+
+function normalizeQueuedCandidates(candidates: PdfFigureCandidate[], fallbackName: string) {
+  const fallbackId = `restored-${fallbackName || "pdf"}`;
+  return candidates.map((candidate) => ({
+    ...candidate,
+    documentId: candidate.documentId || fallbackId,
+    documentName: candidate.documentName || fallbackName || "이전 PDF 작업",
+    documentOrder: Number.isFinite(candidate.documentOrder) ? candidate.documentOrder : 0,
+  }));
+}
+
+function documentsFromCandidates(candidates: PdfFigureCandidate[]) {
+  return candidates.reduce<BatchDocument[]>((documents, candidate) => {
+    const existing = documents.find((document) => document.id === candidate.documentId);
+    if (existing) {
+      existing.candidateCount += 1;
+      existing.selectedCount += Number(candidate.selected);
+    } else {
+      documents.push({ id: candidate.documentId, name: candidate.documentName, order: candidate.documentOrder, candidateCount: 1, selectedCount: Number(candidate.selected), status: "ready" });
+    }
+    return documents;
+  }, []).sort((left, right) => left.order - right.order);
 }
 
 function openDraftDatabase() {
@@ -523,11 +566,14 @@ export default function Home() {
   const [redoCount, setRedoCount] = useState(0);
   const [pdfCandidates, setPdfCandidates] = useState<PdfFigureCandidate[]>([]);
   const [reviewFileName, setReviewFileName] = useState("");
+  const [batchDocuments, setBatchDocuments] = useState<BatchDocument[]>([]);
+  const [learningFlow, setLearningFlow] = useState<LearningFlowEntry[]>([]);
   const [showTextOverlay, setShowTextOverlay] = useState(false);
   const [autosaveReady, setAutosaveReady] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
   const [isSavingDraft, setIsSavingDraft] = useState(false);
   const uploadRef = useRef<HTMLInputElement>(null);
+  const batchUploadRef = useRef<HTMLInputElement>(null);
   const undoStackRef = useRef<WorkspaceSnapshot[]>([]);
   const redoStackRef = useRef<WorkspaceSnapshot[]>([]);
   const focusRenderRef = useRef(0);
@@ -556,6 +602,8 @@ export default function Home() {
       pdfCandidates: pdfCandidates.map((candidate) => ({ ...candidate, crop: { ...candidate.crop }, textRegions: candidate.textRegions.map((region) => ({ ...region })) })),
       reviewFileName,
       showTextOverlay,
+      batchDocuments,
+      learningFlow: learningFlow.map((entry) => ({ ...entry, candidateIds: [...entry.candidateIds], pageIds: [...entry.pageIds] })),
     };
   }
 
@@ -573,8 +621,11 @@ export default function Home() {
           setMode(draft.settings.mode);
           setSimplification(draft.settings.simplification);
           setInvert(draft.settings.invert);
-          setPdfCandidates(draft.pdfCandidates ?? []);
+          const restoredCandidates = normalizeQueuedCandidates(draft.pdfCandidates ?? [], draft.reviewFileName ?? "");
+          setPdfCandidates(restoredCandidates);
           setReviewFileName(draft.reviewFileName ?? "");
+          setBatchDocuments(draft.batchDocuments?.length ? draft.batchDocuments : documentsFromCandidates(restoredCandidates));
+          setLearningFlow(draft.learningFlow ?? []);
           setShowTextOverlay(Boolean(draft.showTextOverlay));
           setLastSavedAt(draft.savedAt);
           setStatus("브라우저 임시 저장 작업을 복원했습니다.");
@@ -594,7 +645,7 @@ export default function Home() {
         .catch(() => undefined);
     }, 850);
     return () => { if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current); };
-  }, [pages, sourceSets, selectedId, fileTitle, threshold, mode, simplification, invert, pdfCandidates, reviewFileName, showTextOverlay, autosaveReady]);
+  }, [pages, sourceSets, selectedId, fileTitle, threshold, mode, simplification, invert, pdfCandidates, reviewFileName, batchDocuments, learningFlow, showTextOverlay, autosaveReady]);
 
   function saveTemporaryDraftNow() {
     setIsSavingDraft(true);
@@ -626,6 +677,11 @@ export default function Home() {
         candidates: sourceSet.candidates.map((candidate) => ({ ...candidate, crop: { ...candidate.crop } })),
       })),
       selectedId,
+      pdfCandidates: pdfCandidates.map(copyCandidate),
+      batchDocuments: batchDocuments.map((document) => ({ ...document })),
+      learningFlow: learningFlow.map((entry) => ({ ...entry, candidateIds: [...entry.candidateIds], pageIds: [...entry.pageIds] })),
+      reviewFileName,
+      showTextOverlay,
     };
   }
 
@@ -645,6 +701,11 @@ export default function Home() {
       candidates: sourceSet.candidates.map((candidate) => ({ ...candidate, crop: { ...candidate.crop } })),
     })));
     setSelectedId(snapshot.selectedId);
+    setPdfCandidates(snapshot.pdfCandidates.map(copyCandidate));
+    setBatchDocuments(snapshot.batchDocuments.map((document) => ({ ...document })));
+    setLearningFlow(snapshot.learningFlow.map((entry) => ({ ...entry, candidateIds: [...entry.candidateIds], pageIds: [...entry.pageIds] })));
+    setReviewFileName(snapshot.reviewFileName);
+    setShowTextOverlay(snapshot.showTextOverlay);
   }
 
   function undoWorkspace() {
@@ -995,7 +1056,7 @@ export default function Home() {
     return extracted.toDataURL("image/png");
   }
 
-  async function processPdf(file: File): Promise<PdfFigureCandidate[]> {
+  async function processPdf(file: File, queuedDocument: Pick<BatchDocument, "id" | "name" | "order">): Promise<PdfFigureCandidate[]> {
     const data = new Uint8Array(await file.arrayBuffer());
     const pdfDocument = await pdfjsLib.getDocument({ data }).promise;
     const candidates: PdfFigureCandidate[] = [];
@@ -1030,6 +1091,9 @@ export default function Home() {
         regions.forEach((region, index) => {
           candidates.push({
             id: createId(),
+            documentId: queuedDocument.id,
+            documentName: queuedDocument.name,
+            documentOrder: queuedDocument.order,
             source: sourceFromRegion(canvas, region),
             label: `${file.name.replace(/\.pdf$/i, "")} · ${pageNumber}쪽 그림 ${index + 1}`,
             pageNumber,
@@ -1043,6 +1107,9 @@ export default function Home() {
       } else {
         candidates.push({
           id: createId(),
+          documentId: queuedDocument.id,
+          documentName: queuedDocument.name,
+          documentOrder: queuedDocument.order,
           source: pagePreview,
           label: `${file.name.replace(/\.pdf$/i, "")} · ${pageNumber}쪽 전체`,
           pageNumber,
@@ -1057,7 +1124,7 @@ export default function Home() {
     return candidates;
   }
 
-  async function generateSourceWorkflow(sources: SourceInput[], title: string) {
+  async function generateSourceWorkflow(sources: SourceInput[], title: string, flowEntries: Omit<LearningFlowEntry, "pageIds">[] = []) {
     if (!sources.length) {
       setStatus("변환할 그림 후보를 하나 이상 선택해 주세요.");
       return;
@@ -1072,19 +1139,66 @@ export default function Home() {
     setFileTitle(title);
     setPdfCandidates([]);
     setReviewFileName("");
+    setBatchDocuments([]);
+    setLearningFlow(flowEntries.map((entry, index) => ({
+      ...entry,
+      pageIds: generated.filter((page) => page.sourceKey === sets[index]?.id).map((page) => page.id),
+    })));
     setStatus(`${sources.length}개 원본에서 ${generated.length}개 촉각 구조도 초안을 만들었습니다. 핵심 부위를 클릭해 3번째 페이지를 바꿔 보세요.`);
+    return { sets, generated };
   }
 
   function toggleCandidate(candidateId: string) {
-    setPdfCandidates((current) => current.map((candidate) => candidate.id === candidateId ? { ...candidate, selected: !candidate.selected } : candidate));
+    setPdfCandidates((current) => {
+      const next = current.map((candidate) => candidate.id === candidateId ? { ...candidate, selected: !candidate.selected } : candidate);
+      updateBatchCounts(next);
+      return next;
+    });
   }
 
   function setAllCandidates(selected: boolean) {
-    setPdfCandidates((current) => current.map((candidate) => ({ ...candidate, selected })));
+    setPdfCandidates((current) => {
+      const next = current.map((candidate) => ({ ...candidate, selected }));
+      updateBatchCounts(next);
+      return next;
+    });
+  }
+
+  function updateBatchCounts(candidates: PdfFigureCandidate[]) {
+    setBatchDocuments((documents) => documents.map((document) => {
+      const documentCandidates = candidates.filter((candidate) => candidate.documentId === document.id);
+      return { ...document, candidateCount: documentCandidates.length, selectedCount: documentCandidates.filter((candidate) => candidate.selected).length };
+    }));
+  }
+
+  async function updateCandidateBoundary(candidateId: string, crop: Crop) {
+    const candidate = pdfCandidates.find((item) => item.id === candidateId);
+    if (!candidate) return;
+    const constrained = constrainCrop({ ...crop, rotation: 0 });
+    recordHistory();
+    try {
+      const source = await sourceFromCrop(candidate.pagePreview, constrained);
+      setPdfCandidates((current) => current.map((item) => item.id === candidateId ? { ...item, crop: constrained, source } : item));
+      setStatus(`${candidate.documentName} ${candidate.pageNumber}쪽의 그림 후보 경계를 보정했습니다.`);
+    } catch {
+      setStatus("그림 후보 경계를 갱신하지 못했습니다.");
+    }
+  }
+
+  function updateLearningDescription(entryId: string, description: string) {
+    setLearningFlow((current) => current.map((entry) => entry.id === entryId ? { ...entry, description } : entry));
+  }
+
+  function openLearningEntry(entry: LearningFlowEntry) {
+    const firstPage = entry.pageIds.find((pageId) => pages.some((page) => page.id === pageId));
+    if (firstPage) {
+      setSelectedId(firstPage);
+      setStatus(`${entry.documentName} ${entry.pageNumber}쪽의 촉각 구조도 세트를 열었습니다.`);
+    }
   }
 
   async function convertReviewedCandidates(merge: boolean) {
-    const selected = pdfCandidates.filter((candidate) => candidate.selected);
+    const selected = pdfCandidates.filter((candidate) => candidate.selected).sort((left, right) => left.documentOrder - right.documentOrder || left.pageNumber - right.pageNumber || left.label.localeCompare(right.label));
     if (!selected.length) {
       setStatus("변환할 그림 후보를 하나 이상 선택해 주세요.");
       return;
@@ -1092,13 +1206,18 @@ export default function Home() {
     setIsGenerating(true);
     try {
       let sources: SourceInput[];
+      let flowEntries: Omit<LearningFlowEntry, "pageIds">[];
       if (!merge) {
-        sources = selected.map((candidate) => ({ source: candidate.source, label: candidate.label }));
+        sources = selected.map((candidate) => ({ source: candidate.source, label: candidate.label, documentId: candidate.documentId, documentName: candidate.documentName, documentOrder: candidate.documentOrder, pdfPageNumber: candidate.pageNumber, candidateIds: [candidate.id] }));
+        flowEntries = selected.map((candidate) => ({ id: createId(), documentId: candidate.documentId, documentName: candidate.documentName, documentOrder: candidate.documentOrder, pageNumber: candidate.pageNumber, label: candidate.label, source: candidate.source, candidateIds: [candidate.id], description: `${candidate.documentName} ${candidate.pageNumber}쪽에서 선택한 그림 후보입니다.` }));
       } else {
-        const pagesByNumber = new Map<number, PdfFigureCandidate[]>();
-        selected.forEach((candidate) => pagesByNumber.set(candidate.pageNumber, [...(pagesByNumber.get(candidate.pageNumber) ?? []), candidate]));
+        const pagesByNumber = new Map<string, PdfFigureCandidate[]>();
+        selected.forEach((candidate) => {
+          const key = `${candidate.documentId}-${candidate.pageNumber}`;
+          pagesByNumber.set(key, [...(pagesByNumber.get(key) ?? []), candidate]);
+        });
         const groups: PdfFigureCandidate[][] = Array.from(pagesByNumber.values());
-        sources = await Promise.all(groups.map(async (group: PdfFigureCandidate[]) => {
+        const merged = await Promise.all(groups.map(async (group: PdfFigureCandidate[]) => {
           const left = Math.min(...group.map((candidate) => candidate.crop.x));
           const top = Math.min(...group.map((candidate) => candidate.crop.y));
           const right = Math.max(...group.map((candidate) => candidate.crop.x + candidate.crop.width));
@@ -1106,15 +1225,63 @@ export default function Home() {
           const crop = { x: left, y: top, width: right - left, height: bottom - top, rotation: 0 };
           return {
             source: await sourceFromCrop(group[0].pagePreview, crop),
-            label: `${reviewFileName.replace(/\.pdf$/i, "")} · ${group[0].pageNumber}쪽 선택 그림 ${group.length}개 병합`,
+            label: `${group[0].documentName.replace(/\.pdf$/i, "")} · ${group[0].pageNumber}쪽 선택 그림 ${group.length}개 병합`,
+            documentId: group[0].documentId,
+            documentName: group[0].documentName,
+            documentOrder: group[0].documentOrder,
+            pdfPageNumber: group[0].pageNumber,
+            candidateIds: group.map((candidate) => candidate.id),
           };
         }));
+        sources = merged;
+        flowEntries = merged.map((source) => ({ id: createId(), documentId: source.documentId ?? "", documentName: source.documentName ?? source.label, documentOrder: source.documentOrder ?? 0, pageNumber: source.pdfPageNumber ?? 0, label: source.label, source: source.source, candidateIds: source.candidateIds ?? [], description: `${source.documentName} ${source.pdfPageNumber}쪽의 선택 그림 ${source.candidateIds?.length ?? 1}개를 하나의 학습 원본으로 병합했습니다.` }));
       }
-      await generateSourceWorkflow(sources, reviewFileName.replace(/\.pdf$/i, ""));
+      const title = batchDocuments.length > 1 ? `${batchDocuments.length}개 PDF 일괄 촉각 구조도` : (selected[0]?.documentName ?? reviewFileName).replace(/\.pdf$/i, "");
+      await generateSourceWorkflow(sources, title, flowEntries);
     } catch {
       setStatus("선택한 그림 후보를 변환하지 못했습니다.");
     } finally {
       setIsGenerating(false);
+    }
+  }
+
+  async function handlePdfBatch(files: File[]) {
+    const pdfFiles = files.filter((file) => file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf"));
+    if (!pdfFiles.length) {
+      setStatus("PDF 파일을 하나 이상 선택해 주세요.");
+      return;
+    }
+    setIsLoading(true);
+    const startOrder = batchDocuments.length;
+    const queued = pdfFiles.map((file, index): BatchDocument => ({ id: createId(), name: file.name, order: startOrder + index, candidateCount: 0, selectedCount: 0, status: "queued" }));
+    setBatchDocuments((current) => [...current, ...queued]);
+    let totalCandidates = 0;
+    let completed = 0;
+    try {
+      for (let index = 0; index < pdfFiles.length; index += 1) {
+        const file = pdfFiles[index];
+        const queuedDocument = queued[index];
+        setBatchDocuments((current) => current.map((document) => document.id === queuedDocument.id ? { ...document, status: "analyzing" } : document));
+        setStatus(`일괄 대기열 ${index + 1}/${pdfFiles.length}: ${file.name} 분석 중…`);
+        try {
+          const candidates = await processPdf(file, queuedDocument);
+          totalCandidates += candidates.length;
+          completed += 1;
+          setPdfCandidates((current) => {
+            const next = [...current, ...candidates];
+            updateBatchCounts(next);
+            return next;
+          });
+          setBatchDocuments((current) => current.map((document) => document.id === queuedDocument.id ? { ...document, status: "ready", candidateCount: candidates.length, selectedCount: candidates.length } : document));
+        } catch (error) {
+          setBatchDocuments((current) => current.map((document) => document.id === queuedDocument.id ? { ...document, status: "error", error: error instanceof Error ? error.message : "분석 실패" } : document));
+        }
+      }
+      setReviewFileName(pdfFiles.length === 1 ? pdfFiles[0].name : `${pdfFiles.length}개 PDF 일괄 대기열`);
+      setShowTextOverlay(false);
+      setStatus(`${completed}/${pdfFiles.length}개 PDF에서 총 ${totalCandidates}개 그림 후보를 대기열에 추가했습니다. 후보를 검토해 변환을 시작하세요.`);
+    } finally {
+      setIsLoading(false);
     }
   }
 
@@ -1123,11 +1290,9 @@ export default function Home() {
     setIsLoading(true);
     try {
       if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
-        const candidates = await processPdf(file);
-        setPdfCandidates(candidates);
-        setReviewFileName(file.name);
-        setShowTextOverlay(false);
-        setStatus(`${candidates.length}개 그림 후보를 찾았습니다. 포함할 후보를 검토한 뒤 개별 또는 병합 변환을 선택해 주세요.`);
+        setIsLoading(false);
+        await handlePdfBatch([file]);
+        return;
       } else if (file.type.startsWith("image/")) {
         const source = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
@@ -1284,42 +1449,47 @@ export default function Home() {
           <div className="flex flex-wrap gap-2 text-xs font-medium text-[#315c4d]">
             <span className="rounded-full border border-[#bdd4c9] bg-white/70 px-3 py-1.5">무료 · 계정 불필요</span>
             <span className="rounded-full border border-[#bdd4c9] bg-white/70 px-3 py-1.5">3페이지 자동 초안</span>
+            <span className="rounded-full border border-[#bdd4c9] bg-white/70 px-3 py-1.5">여러 PDF 일괄 검토</span>
             <span className="rounded-full border border-[#bdd4c9] bg-white/70 px-3 py-1.5">클릭하여 핵심 부위 선택</span>
           </div>
         </section>
 
-        {pdfCandidates.length > 0 && (
+        {(pdfCandidates.length > 0 || batchDocuments.length > 0) && (
           <section className="mb-7 overflow-hidden rounded-[24px] border border-[#b8d5c7] bg-white shadow-[0_14px_28px_rgba(31,73,57,.08)]">
             <div className="flex flex-col gap-4 border-b border-[#dcebe3] bg-[linear-gradient(120deg,#eaf4ef_0%,#fdfbf3_100%)] px-5 py-5 lg:flex-row lg:items-center lg:justify-between lg:px-6">
               <div className="flex gap-3">
                 <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#17352b] text-[#f4ca68]"><FileImage className="h-5 w-5" /></div>
                 <div>
-                  <p className="text-sm font-bold text-[#17352b]">PDF 그림 후보 검토</p>
-                  <p className="mt-1 text-xs leading-5 text-[#527267]"><strong>{reviewFileName}</strong>에서 감지한 {pdfCandidates.length}개 후보입니다. 포함할 그림만 고르고, 같은 페이지의 선택 그림은 하나의 원본으로 병합할 수 있습니다.</p>
+                  <p className="text-sm font-bold text-[#17352b]">PDF 그림 후보 일괄 검토</p>
+                  <p className="mt-1 text-xs leading-5 text-[#527267]"><strong>{reviewFileName}</strong> 대기열에서 감지한 {pdfCandidates.length}개 후보입니다. 파일 순서대로 후보를 고르고, 같은 PDF 페이지의 선택 그림은 하나의 원본으로 병합할 수 있습니다.</p>
                 </div>
               </div>
               <div className="flex flex-wrap gap-2">
+                <Button variant="outline" className="h-9 rounded-xl border-[#b7d4c5] bg-white text-xs" onClick={() => batchUploadRef.current?.click()} disabled={isLoading}><Files className="mr-1.5 h-3.5 w-3.5" />PDF 추가</Button>
                 <Button variant="outline" className="h-9 rounded-xl border-[#b7d4c5] bg-white text-xs" onClick={() => setAllCandidates(true)}>모두 포함</Button>
                 <Button variant="outline" className="h-9 rounded-xl border-[#b7d4c5] bg-white text-xs" onClick={() => setAllCandidates(false)}>모두 제외</Button>
                 <Button variant="outline" className={cn("h-9 rounded-xl border-[#b7d4c5] bg-white text-xs", showTextOverlay && "bg-[#17352b] text-white hover:bg-[#244b3d] hover:text-white")} onClick={() => setShowTextOverlay((current) => !current)}>{showTextOverlay ? <EyeOff className="mr-1.5 h-3.5 w-3.5" /> : <Eye className="mr-1.5 h-3.5 w-3.5" />}{showTextOverlay ? "본문 제외 영역 숨기기" : "본문 제외 영역 보기"}</Button>
               </div>
             </div>
 
+            <div className="grid gap-2 border-b border-[#dcebe3] bg-[#fbfdfb] px-5 py-4 sm:grid-cols-2 lg:grid-cols-3 lg:px-6">
+              {batchDocuments.map((document, index) => (
+                <div key={document.id} className={cn("flex items-center gap-3 rounded-xl border px-3 py-2.5", document.status === "error" ? "border-rose-200 bg-rose-50" : document.status === "analyzing" ? "border-[#e9c66e] bg-[#fffaf0]" : "border-[#d8e7df] bg-white")}>
+                  <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-[#17352b] text-[11px] font-bold text-[#f4ca68]">{index + 1}</span>
+                  <span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold text-[#17352b]">{document.name}</span><span className="mt-0.5 block text-[10px] text-slate-500">{document.status === "analyzing" ? "그림·본문 영역 분석 중…" : document.status === "error" ? document.error ?? "분석 실패" : `${document.candidateCount}개 후보 · ${document.selectedCount}개 포함`}</span></span>
+                  {document.status === "analyzing" && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[#b57d16]" />}
+                </div>
+              ))}
+            </div>
+
             <div className="grid gap-4 p-5 md:grid-cols-2 xl:grid-cols-3 lg:p-6">
               {pdfCandidates.map((candidate, index) => (
                 <article key={candidate.id} className={cn("overflow-hidden rounded-2xl border bg-white transition", candidate.selected ? "border-[#5a9a79] shadow-[0_8px_20px_rgba(41,103,76,.12)]" : "border-slate-200 opacity-65")}> 
-                  <div className="relative aspect-[4/3] overflow-hidden bg-slate-100">
-                    <img className="h-full w-full object-contain" src={candidate.pagePreview} alt={`${candidate.pageNumber}쪽 PDF 원본 페이지`} />
-                    <div className="pointer-events-none absolute inset-0 bg-black/10" />
-                    {showTextOverlay && candidate.textRegions.map((region, regionIndex) => <span key={regionIndex} className="pointer-events-none absolute border border-dashed border-[#d4713e] bg-[#f6a56f]/35" style={{ left: `${region.x * 100}%`, top: `${region.y * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%` }} />)}
-                    <span className="pointer-events-none absolute border-2 border-[#f4ca68] bg-[#f4ca68]/15 shadow-[0_0_0_9999px_rgba(17,40,31,.28)]" style={{ left: `${candidate.crop.x * 100}%`, top: `${candidate.crop.y * 100}%`, width: `${candidate.crop.width * 100}%`, height: `${candidate.crop.height * 100}%` }} />
-                    <span className="absolute left-3 top-3 rounded-full bg-[#17352b] px-2 py-1 text-[10px] font-bold text-white">{candidate.pageNumber}쪽 · 후보 {index + 1}</span>
-                    {showTextOverlay && <span className="absolute bottom-3 left-3 rounded-full bg-[#d4713e] px-2 py-1 text-[10px] font-bold text-white">{candidate.detection === "ocr" ? "OCR 본문 제외" : candidate.detection === "native" ? "PDF 텍스트 제외" : "본문 영역 없음"}</span>}
-                  </div>
+                  <CandidateBoundaryEditor source={candidate.pagePreview} crop={candidate.crop} textRegions={candidate.textRegions} showTextOverlay={showTextOverlay} documentLabel={`${candidate.documentName} · ${candidate.pageNumber}쪽 · 후보 ${index + 1}`} detection={candidate.detection} onCommit={(crop) => void updateCandidateBoundary(candidate.id, crop)} />
                   <div className="p-3">
                     <div className="flex items-start gap-3">
                       <img className="h-16 w-20 rounded-lg border border-slate-200 bg-[#fafbf9] object-contain" src={candidate.source} alt={`${candidate.label} 추출 이미지`} />
-                      <div className="min-w-0 flex-1"><p className="truncate text-xs font-bold text-slate-700">{candidate.label}</p><p className="mt-1 text-[11px] leading-4 text-slate-500">노란 상자는 추출 후보, 주황 영역은 OCR 또는 PDF 텍스트 레이어에서 제외된 본문입니다.</p></div>
+                      <div className="min-w-0 flex-1"><p className="truncate text-xs font-bold text-slate-700">{candidate.label}</p><p className="mt-1 text-[11px] leading-4 text-slate-500"><PencilRuler className="mr-1 inline h-3 w-3 text-[#b57d16]" />노란 경계를 드래그하고 모서리를 움직여 추출 영역을 보정합니다.</p></div>
                     </div>
                     <Button variant={candidate.selected ? "default" : "outline"} className={cn("mt-3 h-8 w-full rounded-lg text-xs", candidate.selected ? "bg-[#17352b] text-white hover:bg-[#244b3d]" : "border-slate-200 text-slate-600")} onClick={() => toggleCandidate(candidate.id)}>{candidate.selected ? <Check className="mr-1.5 h-3.5 w-3.5" /> : <X className="mr-1.5 h-3.5 w-3.5" />}{candidate.selected ? "변환에 포함" : "변환에서 제외"}</Button>
                   </div>
@@ -1333,6 +1503,31 @@ export default function Home() {
                 <Button variant="outline" className="rounded-xl border-[#9ec3af] bg-white text-xs text-[#17352b]" onClick={() => void convertReviewedCandidates(false)} disabled={isGenerating}><FilePlus2 className="mr-1.5 h-3.5 w-3.5" />개별 변환</Button>
                 <Button className="rounded-xl bg-[#e0a93a] text-xs font-bold text-[#17352b] hover:bg-[#f1bd51]" onClick={() => void convertReviewedCandidates(true)} disabled={isGenerating}>{isGenerating ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Layers3 className="mr-1.5 h-3.5 w-3.5" />}선택 병합 변환</Button>
               </div>
+            </div>
+          </section>
+        )}
+
+        {learningFlow.length > 0 && (
+          <section className="mb-7 overflow-hidden rounded-[24px] border border-[#cadcd4] bg-white shadow-[0_14px_28px_rgba(31,73,57,.08)]">
+            <div className="flex flex-col gap-3 border-b border-[#dcebe3] bg-[linear-gradient(120deg,#f1f7f3_0%,#fdf9ea_100%)] px-5 py-5 lg:flex-row lg:items-center lg:justify-between lg:px-6">
+              <div className="flex gap-3">
+                <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#17352b] text-[#f4ca68]"><BookOpen className="h-5 w-5" /></div>
+                <div><p className="text-sm font-bold text-[#17352b]">PDF → 촉각 학습 흐름</p><p className="mt-1 text-xs leading-5 text-[#527267]">PDF 파일·페이지 순서를 유지해, 각 그림의 설명과 연결된 전체·구조·확대 촉각 페이지를 확인합니다.</p></div>
+              </div>
+              <span className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-[#315c4d] shadow-sm">{learningFlow.length}개 학습 단위 · {learningFlow.reduce((total, entry) => total + entry.pageIds.length, 0)}개 촉각 페이지</span>
+            </div>
+            <div className="space-y-0 divide-y divide-[#e3ece7]">
+              {learningFlow.slice().sort((left, right) => left.documentOrder - right.documentOrder || left.pageNumber - right.pageNumber).map((entry, index) => {
+                const tactilePages = entry.pageIds.map((pageId) => pages.find((page) => page.id === pageId)).filter((page): page is TactilePage => Boolean(page));
+                return (
+                  <article key={entry.id} className="grid gap-4 px-5 py-5 lg:grid-cols-[42px_148px_minmax(0,1fr)_minmax(280px,.95fr)] lg:items-center lg:px-6">
+                    <div className="flex lg:flex-col lg:items-center"><span className="grid h-8 w-8 place-items-center rounded-xl bg-[#17352b] text-xs font-bold text-[#f4ca68]">{index + 1}</span><ChevronRight className="ml-2 h-4 w-4 text-[#a6bcaf] lg:ml-0 lg:mt-1 lg:rotate-90" /></div>
+                    <img src={entry.source} alt={`${entry.documentName} ${entry.pageNumber}쪽에서 선택한 그림`} className="aspect-[4/3] w-full rounded-xl border border-[#d7e5de] bg-[#fbfcfa] object-contain" />
+                    <div className="min-w-0"><p className="text-xs font-bold text-[#17352b]">{entry.documentName} · {entry.pageNumber}쪽</p><p className="mt-1 truncate text-[11px] font-medium text-[#527267]">{entry.label}</p><Label htmlFor={`flow-description-${entry.id}`} className="mt-3 block text-[11px] font-bold text-slate-600">그림 설명</Label><Textarea id={`flow-description-${entry.id}`} className="mt-1 min-h-20 rounded-xl border-[#d8e7df] bg-[#fbfdfb] text-xs leading-5" value={entry.description} onFocus={recordHistory} onChange={(event) => updateLearningDescription(entry.id, event.target.value)} /></div>
+                    <div className="rounded-2xl border border-[#d8e7df] bg-[#f8fbf9] p-3"><p className="text-[11px] font-bold text-[#315c4d]">연결된 촉각 페이지</p><div className="mt-2 grid grid-cols-3 gap-2">{tactilePages.map((page) => <button key={page.id} onClick={() => { setSelectedId(page.id); setStatus(`${entry.documentName} ${entry.pageNumber}쪽과 연결된 ${pageInfo(page.kind).title} 페이지를 열었습니다.`); }} className={cn("rounded-lg border px-2 py-2 text-center text-[10px] font-bold transition", page.id === selectedId ? "border-[#2e7759] bg-[#17352b] text-white" : "border-[#cfe0d7] bg-white text-[#315c4d] hover:bg-[#e9f3ed]")}>{pageInfo(page.kind).title.replace(/^\d\. /, "")}</button>)}</div><Button variant="outline" className="mt-3 h-8 w-full rounded-lg border-[#a6c7b6] bg-white text-[11px] text-[#17352b]" onClick={() => openLearningEntry(entry)}>이 학습 단위 열기 <ArrowRight className="ml-1.5 h-3.5 w-3.5" /></Button></div>
+                  </article>
+                );
+              })}
             </div>
           </section>
         )}
@@ -1500,10 +1695,13 @@ export default function Home() {
 
             <section className="rounded-[22px] border border-dashed border-[#a9c8bb] bg-[#eff6f2] p-5">
               <input ref={uploadRef} aria-label="이미지 또는 PDF 파일 선택" type="file" accept="image/png,image/jpeg,image/webp,application/pdf" className="pointer-events-none absolute h-px w-px opacity-0" onChange={(event) => handleFile(event.target.files?.[0])} />
+              <input ref={batchUploadRef} aria-label="여러 PDF 파일 대기열 선택" type="file" accept="application/pdf,.pdf" multiple className="pointer-events-none absolute h-px w-px opacity-0" onChange={(event) => { void handlePdfBatch(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} />
               <div className="grid h-10 w-10 place-items-center rounded-xl bg-white text-[#2d7056] shadow-sm"><ImageUp className="h-5 w-5" /></div>
               <h2 className="mt-3 text-sm font-bold text-[#17352b]">원본 불러오기</h2>
               <p className="mt-1 text-xs leading-5 text-[#527267]">PNG, JPG, WebP 또는 PDF 전체 페이지에서 3단계 촉각 구조도를 만듭니다. PDF는 텍스트 레이어를 제외하고, 스캔본은 OCR로 문자 영역을 찾습니다.</p>
               <Button className="mt-4 w-full rounded-xl bg-[#17352b] text-white hover:bg-[#244b3d]" onClick={() => uploadRef.current?.click()} disabled={isLoading}>{isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}{isLoading ? "분석 중…" : "파일 선택"}</Button>
+              <Button variant="outline" className="mt-2 w-full rounded-xl border-[#9fc3b1] bg-white text-xs text-[#17352b] hover:bg-[#f9fcfa]" onClick={() => batchUploadRef.current?.click()} disabled={isLoading}><Files className="mr-2 h-4 w-4 text-[#2d7056]" />여러 PDF 대기열에 추가</Button>
+              <p className="mt-2 text-[10px] leading-4 text-[#527267]">여러 PDF를 선택하면 파일 순서대로 분석한 뒤, 모든 그림 후보를 하나의 검토 목록에 모읍니다.</p>
               {lastSavedAt && <Button variant="ghost" className="mt-2 h-8 w-full rounded-lg text-[11px] text-[#527267] hover:bg-white/70 hover:text-[#17352b]" onClick={clearTemporaryDraft}><Trash2 className="mr-1.5 h-3.5 w-3.5" />브라우저 임시 저장 삭제</Button>}
               <p aria-live="polite" className="mt-3 text-[11px] leading-4 text-[#527267]">{status}</p>
             </section>
@@ -1624,6 +1822,85 @@ function FocusPicker({ source, crop, onSelectCenter, onCommit }: { source: strin
         </div>
       </div>
       <p className="mt-2 flex items-center gap-1.5 text-[11px] leading-4 text-slate-500"><ScanSearch className="h-3.5 w-3.5 text-[#507366]" />원본을 클릭하면 중심을 이동합니다. 박스를 드래그하고, 모서리로 크기를, 위쪽 원으로 회전을 조절하세요.</p>
+    </div>
+  );
+}
+
+function CandidateBoundaryEditor({ source, crop, textRegions, showTextOverlay, documentLabel, detection, onCommit }: { source: string; crop: Crop; textRegions: TextRegion[]; showTextOverlay: boolean; documentLabel: string; detection: PdfFigureCandidate["detection"]; onCommit: (crop: Crop) => void }) {
+  type CandidateInteraction = { type: "move" | "resize"; handle?: "nw" | "ne" | "se" | "sw"; startX: number; startY: number; origin: Crop };
+  const editorRef = useRef<HTMLDivElement>(null);
+  const [draft, setDraft] = useState(crop);
+  const draftRef = useRef(crop);
+  const interactionRef = useRef<CandidateInteraction | null>(null);
+
+  useEffect(() => {
+    draftRef.current = crop;
+    setDraft(crop);
+  }, [crop]);
+
+  function point(event: React.PointerEvent<HTMLElement>) {
+    const bounds = editorRef.current?.getBoundingClientRect();
+    if (!bounds) return { x: 0.5, y: 0.5 };
+    return { x: clamp((event.clientX - bounds.left) / bounds.width, 0, 1), y: clamp((event.clientY - bounds.top) / bounds.height, 0, 1) };
+  }
+
+  function updateDraft(next: Crop) {
+    const constrained = constrainCrop({ ...next, rotation: 0 });
+    draftRef.current = constrained;
+    setDraft(constrained);
+  }
+
+  function begin(event: React.PointerEvent<HTMLElement>, type: CandidateInteraction["type"], handle?: CandidateInteraction["handle"]) {
+    event.preventDefault();
+    event.stopPropagation();
+    const start = point(event);
+    interactionRef.current = { type, handle, startX: start.x, startY: start.y, origin: draftRef.current };
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* Synthetic pointer capture can be unavailable. */ }
+  }
+
+  function move(event: React.PointerEvent<HTMLDivElement>) {
+    const interaction = interactionRef.current;
+    if (!interaction) return;
+    const current = point(event);
+    const deltaX = current.x - interaction.startX;
+    const deltaY = current.y - interaction.startY;
+    let next = interaction.origin;
+    if (interaction.type === "move") next = { ...interaction.origin, x: interaction.origin.x + deltaX, y: interaction.origin.y + deltaY };
+    if (interaction.type === "resize") {
+      const { origin, handle } = interaction;
+      if (handle === "nw") next = { ...origin, x: origin.x + deltaX, y: origin.y + deltaY, width: origin.width - deltaX, height: origin.height - deltaY };
+      if (handle === "ne") next = { ...origin, y: origin.y + deltaY, width: origin.width + deltaX, height: origin.height - deltaY };
+      if (handle === "se") next = { ...origin, width: origin.width + deltaX, height: origin.height + deltaY };
+      if (handle === "sw") next = { ...origin, x: origin.x + deltaX, width: origin.width - deltaX, height: origin.height + deltaY };
+    }
+    updateDraft(next);
+  }
+
+  function end() {
+    if (!interactionRef.current) return;
+    interactionRef.current = null;
+    onCommit(draftRef.current);
+  }
+
+  const handles = [
+    ["nw", "left-0 top-0 -translate-x-1/2 -translate-y-1/2 cursor-nwse-resize"],
+    ["ne", "right-0 top-0 translate-x-1/2 -translate-y-1/2 cursor-nesw-resize"],
+    ["se", "bottom-0 right-0 translate-x-1/2 translate-y-1/2 cursor-nwse-resize"],
+    ["sw", "bottom-0 left-0 -translate-x-1/2 translate-y-1/2 cursor-nesw-resize"],
+  ] as const;
+
+  return (
+    <div ref={editorRef} aria-label={`${documentLabel} 그림 후보 경계 편집기`} className="relative overflow-hidden bg-slate-100" onPointerMove={move} onPointerUp={end} onPointerCancel={end}>
+      <img className="block h-auto w-full select-none" src={source} alt={`${documentLabel} PDF 원본 페이지`} draggable={false} />
+      <div className="pointer-events-none absolute inset-0 bg-black/10" />
+      {showTextOverlay && textRegions.map((region, index) => <span key={index} className="pointer-events-none absolute border border-dashed border-[#d4713e] bg-[#f6a56f]/35" style={{ left: `${region.x * 100}%`, top: `${region.y * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%` }} />)}
+      <div className="absolute border-2 border-[#f4ca68] bg-[#f4ca68]/15 shadow-[0_0_0_9999px_rgba(17,40,31,.28)]" style={{ left: `${draft.x * 100}%`, top: `${draft.y * 100}%`, width: `${draft.width * 100}%`, height: `${draft.height * 100}%` }}>
+        <button type="button" aria-label="그림 후보 경계 이동" className="absolute inset-0 cursor-move" onPointerDown={(event) => begin(event, "move")} />
+        <span className="pointer-events-none absolute -top-7 left-0 whitespace-nowrap rounded-md bg-[#17352b] px-2 py-1 text-[10px] font-bold text-white">드래그하여 경계 이동</span>
+        {handles.map(([handle, position]) => <button key={handle} type="button" aria-label={`그림 후보 ${handle} 모서리 크기 조절`} className={cn("absolute z-10 h-3.5 w-3.5 rounded-sm border-2 border-[#17352b] bg-[#f4ca68] shadow-sm", position)} onPointerDown={(event) => begin(event, "resize", handle)} />)}
+      </div>
+      <span className="pointer-events-none absolute left-3 top-3 rounded-full bg-[#17352b] px-2 py-1 text-[10px] font-bold text-white">{documentLabel}</span>
+      {showTextOverlay && <span className="pointer-events-none absolute bottom-3 left-3 rounded-full bg-[#d4713e] px-2 py-1 text-[10px] font-bold text-white">{detection === "ocr" ? "OCR 본문 제외" : detection === "native" ? "PDF 텍스트 제외" : "본문 영역 없음"}</span>}
     </div>
   );
 }

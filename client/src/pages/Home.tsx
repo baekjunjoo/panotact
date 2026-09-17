@@ -15,6 +15,7 @@ import {
   Files,
   FileText,
   Grid3X3,
+  GripVertical,
   ImageUp,
   Layers3,
   Loader2,
@@ -56,7 +57,7 @@ type ConversionMode = "edges" | "filled";
 type PageKind = "overall" | "structure" | "focus" | "manual";
 type Crop = { x: number; y: number; width: number; height: number; rotation: number };
 type FocusCandidate = { id: string; label: string; crop: Crop; score: number };
-type SourceInput = { source: string; label: string; documentId?: string; documentName?: string; documentOrder?: number; pdfPageNumber?: number; candidateIds?: string[] };
+type SourceInput = { source: string; label: string; documentId?: string; documentName?: string; documentOrder?: number; candidateOrder?: number; pdfPageNumber?: number; candidateIds?: string[] };
 type TextRegion = { x: number; y: number; width: number; height: number };
 type BatchDocument = { id: string; name: string; order: number; candidateCount: number; selectedCount: number; status: "queued" | "analyzing" | "ready" | "error"; error?: string };
 type PdfFigureCandidate = {
@@ -64,6 +65,7 @@ type PdfFigureCandidate = {
   documentId: string;
   documentName: string;
   documentOrder: number;
+  candidateOrder: number;
   source: string;
   label: string;
   pageNumber: number;
@@ -73,7 +75,7 @@ type PdfFigureCandidate = {
   pagePreview: string;
   detection: "native" | "ocr" | "none";
 };
-type LearningFlowEntry = { id: string; documentId: string; documentName: string; documentOrder: number; pageNumber: number; label: string; source: string; candidateIds: string[]; pageIds: string[]; description: string };
+type LearningFlowEntry = { id: string; documentId: string; documentName: string; documentOrder: number; candidateOrder: number; pageNumber: number; label: string; source: string; candidateIds: string[]; pageIds: string[]; description: string };
 type SourceSet = SourceInput & {
   id: string;
   aspect: number;
@@ -189,12 +191,19 @@ function copyCandidate(candidate: PdfFigureCandidate): PdfFigureCandidate {
 
 function normalizeQueuedCandidates(candidates: PdfFigureCandidate[], fallbackName: string) {
   const fallbackId = `restored-${fallbackName || "pdf"}`;
-  return candidates.map((candidate) => ({
+  const nextOrderByDocument = new Map<string, number>();
+  return candidates.map((candidate) => {
+    const documentId = candidate.documentId || fallbackId;
+    const nextOrder = nextOrderByDocument.get(documentId) ?? 0;
+    nextOrderByDocument.set(documentId, nextOrder + 1);
+    return {
     ...candidate,
-    documentId: candidate.documentId || fallbackId,
+    documentId,
     documentName: candidate.documentName || fallbackName || "이전 PDF 작업",
     documentOrder: Number.isFinite(candidate.documentOrder) ? candidate.documentOrder : 0,
-  }));
+    candidateOrder: Number.isFinite(candidate.candidateOrder) ? candidate.candidateOrder : nextOrder,
+    };
+  });
 }
 
 function documentsFromCandidates(candidates: PdfFigureCandidate[]) {
@@ -208,6 +217,15 @@ function documentsFromCandidates(candidates: PdfFigureCandidate[]) {
     }
     return documents;
   }, []).sort((left, right) => left.order - right.order);
+}
+
+function normalizeLearningFlow(entries: LearningFlowEntry[]) {
+  const nextOrderByDocument = new Map<string, number>();
+  return entries.map((entry) => {
+    const fallbackOrder = nextOrderByDocument.get(entry.documentId) ?? 0;
+    nextOrderByDocument.set(entry.documentId, fallbackOrder + 1);
+    return { ...entry, candidateOrder: Number.isFinite(entry.candidateOrder) ? entry.candidateOrder : fallbackOrder };
+  });
 }
 
 function openDraftDatabase() {
@@ -568,6 +586,8 @@ export default function Home() {
   const [reviewFileName, setReviewFileName] = useState("");
   const [batchDocuments, setBatchDocuments] = useState<BatchDocument[]>([]);
   const [learningFlow, setLearningFlow] = useState<LearningFlowEntry[]>([]);
+  const [draggedDocumentId, setDraggedDocumentId] = useState<string | null>(null);
+  const [draggedCandidateId, setDraggedCandidateId] = useState<string | null>(null);
   const [showTextOverlay, setShowTextOverlay] = useState(false);
   const [autosaveReady, setAutosaveReady] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
@@ -589,6 +609,8 @@ export default function Home() {
   }, [activePage?.sourceKey, sourceSets]);
   const sourceImage = activePage?.source ?? activeSourceSet?.source;
   const savedLabel = lastSavedAt ? `임시 저장됨 · ${new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit" }).format(lastSavedAt)}` : "자동 임시 저장 준비됨";
+  const orderedDocuments = useMemo(() => [...batchDocuments].sort((left, right) => left.order - right.order), [batchDocuments]);
+  const orderedCandidates = useMemo(() => [...pdfCandidates].sort((left, right) => left.documentOrder - right.documentOrder || left.candidateOrder - right.candidateOrder), [pdfCandidates]);
 
   function buildTemporaryDraft(): TemporaryDraft {
     return {
@@ -625,7 +647,7 @@ export default function Home() {
           setPdfCandidates(restoredCandidates);
           setReviewFileName(draft.reviewFileName ?? "");
           setBatchDocuments(draft.batchDocuments?.length ? draft.batchDocuments : documentsFromCandidates(restoredCandidates));
-          setLearningFlow(draft.learningFlow ?? []);
+          setLearningFlow(normalizeLearningFlow(draft.learningFlow ?? []));
           setShowTextOverlay(Boolean(draft.showTextOverlay));
           setLastSavedAt(draft.savedAt);
           setStatus("브라우저 임시 저장 작업을 복원했습니다.");
@@ -1094,6 +1116,7 @@ export default function Home() {
             documentId: queuedDocument.id,
             documentName: queuedDocument.name,
             documentOrder: queuedDocument.order,
+            candidateOrder: candidates.length,
             source: sourceFromRegion(canvas, region),
             label: `${file.name.replace(/\.pdf$/i, "")} · ${pageNumber}쪽 그림 ${index + 1}`,
             pageNumber,
@@ -1110,6 +1133,7 @@ export default function Home() {
           documentId: queuedDocument.id,
           documentName: queuedDocument.name,
           documentOrder: queuedDocument.order,
+          candidateOrder: candidates.length,
           source: pagePreview,
           label: `${file.name.replace(/\.pdf$/i, "")} · ${pageNumber}쪽 전체`,
           pageNumber,
@@ -1171,6 +1195,43 @@ export default function Home() {
     }));
   }
 
+  function reorderDocuments(sourceId: string, targetId: string) {
+    if (sourceId === targetId) return;
+    const ordered = [...batchDocuments].sort((left, right) => left.order - right.order);
+    const sourceIndex = ordered.findIndex((document) => document.id === sourceId);
+    const targetIndex = ordered.findIndex((document) => document.id === targetId);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+    const next = [...ordered];
+    const [moved] = next.splice(sourceIndex, 1);
+    next.splice(targetIndex, 0, moved);
+    const orderByDocument = new Map(next.map((document, index) => [document.id, index]));
+    recordHistory();
+    setBatchDocuments(next.map((document, index) => ({ ...document, order: index })));
+    setPdfCandidates((current) => current.map((candidate) => ({ ...candidate, documentOrder: orderByDocument.get(candidate.documentId) ?? candidate.documentOrder })));
+    setStatus("PDF 대기열 순서를 바꿨습니다. 이후 변환과 학습 흐름에 이 순서가 적용됩니다.");
+  }
+
+  function reorderCandidates(sourceId: string, targetId: string) {
+    if (sourceId === targetId) return;
+    const source = pdfCandidates.find((candidate) => candidate.id === sourceId);
+    const target = pdfCandidates.find((candidate) => candidate.id === targetId);
+    if (!source || !target) return;
+    if (source.documentId !== target.documentId) {
+      setStatus("그림 후보는 같은 PDF 안에서 순서를 바꿀 수 있습니다. PDF 사이의 순서는 위 대기열에서 바꿔 주세요.");
+      return;
+    }
+    const siblings = pdfCandidates.filter((candidate) => candidate.documentId === source.documentId).sort((left, right) => left.candidateOrder - right.candidateOrder);
+    const sourceIndex = siblings.findIndex((candidate) => candidate.id === sourceId);
+    const targetIndex = siblings.findIndex((candidate) => candidate.id === targetId);
+    const next = [...siblings];
+    const [moved] = next.splice(sourceIndex, 1);
+    next.splice(targetIndex, 0, moved);
+    const orderByCandidate = new Map(next.map((candidate, index) => [candidate.id, index]));
+    recordHistory();
+    setPdfCandidates((current) => current.map((candidate) => candidate.documentId === source.documentId ? { ...candidate, candidateOrder: orderByCandidate.get(candidate.id) ?? candidate.candidateOrder } : candidate));
+    setStatus(`${source.documentName} 안에서 그림 후보 순서를 바꿨습니다.`);
+  }
+
   async function updateCandidateBoundary(candidateId: string, crop: Crop) {
     const candidate = pdfCandidates.find((item) => item.id === candidateId);
     if (!candidate) return;
@@ -1198,7 +1259,7 @@ export default function Home() {
   }
 
   async function convertReviewedCandidates(merge: boolean) {
-    const selected = pdfCandidates.filter((candidate) => candidate.selected).sort((left, right) => left.documentOrder - right.documentOrder || left.pageNumber - right.pageNumber || left.label.localeCompare(right.label));
+    const selected = pdfCandidates.filter((candidate) => candidate.selected).sort((left, right) => left.documentOrder - right.documentOrder || left.candidateOrder - right.candidateOrder);
     if (!selected.length) {
       setStatus("변환할 그림 후보를 하나 이상 선택해 주세요.");
       return;
@@ -1208,8 +1269,8 @@ export default function Home() {
       let sources: SourceInput[];
       let flowEntries: Omit<LearningFlowEntry, "pageIds">[];
       if (!merge) {
-        sources = selected.map((candidate) => ({ source: candidate.source, label: candidate.label, documentId: candidate.documentId, documentName: candidate.documentName, documentOrder: candidate.documentOrder, pdfPageNumber: candidate.pageNumber, candidateIds: [candidate.id] }));
-        flowEntries = selected.map((candidate) => ({ id: createId(), documentId: candidate.documentId, documentName: candidate.documentName, documentOrder: candidate.documentOrder, pageNumber: candidate.pageNumber, label: candidate.label, source: candidate.source, candidateIds: [candidate.id], description: `${candidate.documentName} ${candidate.pageNumber}쪽에서 선택한 그림 후보입니다.` }));
+        sources = selected.map((candidate) => ({ source: candidate.source, label: candidate.label, documentId: candidate.documentId, documentName: candidate.documentName, documentOrder: candidate.documentOrder, candidateOrder: candidate.candidateOrder, pdfPageNumber: candidate.pageNumber, candidateIds: [candidate.id] }));
+        flowEntries = selected.map((candidate) => ({ id: createId(), documentId: candidate.documentId, documentName: candidate.documentName, documentOrder: candidate.documentOrder, candidateOrder: candidate.candidateOrder, pageNumber: candidate.pageNumber, label: candidate.label, source: candidate.source, candidateIds: [candidate.id], description: `${candidate.documentName} ${candidate.pageNumber}쪽에서 선택한 그림 후보입니다.` }));
       } else {
         const pagesByNumber = new Map<string, PdfFigureCandidate[]>();
         selected.forEach((candidate) => {
@@ -1229,12 +1290,13 @@ export default function Home() {
             documentId: group[0].documentId,
             documentName: group[0].documentName,
             documentOrder: group[0].documentOrder,
+            candidateOrder: group[0].candidateOrder,
             pdfPageNumber: group[0].pageNumber,
             candidateIds: group.map((candidate) => candidate.id),
           };
         }));
         sources = merged;
-        flowEntries = merged.map((source) => ({ id: createId(), documentId: source.documentId ?? "", documentName: source.documentName ?? source.label, documentOrder: source.documentOrder ?? 0, pageNumber: source.pdfPageNumber ?? 0, label: source.label, source: source.source, candidateIds: source.candidateIds ?? [], description: `${source.documentName} ${source.pdfPageNumber}쪽의 선택 그림 ${source.candidateIds?.length ?? 1}개를 하나의 학습 원본으로 병합했습니다.` }));
+        flowEntries = merged.map((source) => ({ id: createId(), documentId: source.documentId ?? "", documentName: source.documentName ?? source.label, documentOrder: source.documentOrder ?? 0, candidateOrder: source.candidateOrder ?? 0, pageNumber: source.pdfPageNumber ?? 0, label: source.label, source: source.source, candidateIds: source.candidateIds ?? [], description: `${source.documentName} ${source.pdfPageNumber}쪽의 선택 그림 ${source.candidateIds?.length ?? 1}개를 하나의 학습 원본으로 병합했습니다.` }));
       }
       const title = batchDocuments.length > 1 ? `${batchDocuments.length}개 PDF 일괄 촉각 구조도` : (selected[0]?.documentName ?? reviewFileName).replace(/\.pdf$/i, "");
       await generateSourceWorkflow(sources, title, flowEntries);
@@ -1472,24 +1534,28 @@ export default function Home() {
               </div>
             </div>
 
-            <div className="grid gap-2 border-b border-[#dcebe3] bg-[#fbfdfb] px-5 py-4 sm:grid-cols-2 lg:grid-cols-3 lg:px-6">
-              {batchDocuments.map((document, index) => (
-                <div key={document.id} className={cn("flex items-center gap-3 rounded-xl border px-3 py-2.5", document.status === "error" ? "border-rose-200 bg-rose-50" : document.status === "analyzing" ? "border-[#e9c66e] bg-[#fffaf0]" : "border-[#d8e7df] bg-white")}>
+            <div className="border-b border-[#dcebe3] bg-[#fbfdfb] px-5 py-4 lg:px-6">
+              <p className="mb-2 text-[11px] font-bold text-[#507366]"><GripVertical className="mr-1 inline h-3.5 w-3.5" />PDF 파일은 손잡이를 끌어 순서를 바꿀 수 있습니다. 아래 그림 후보도 같은 PDF 안에서 순서를 바꿀 수 있습니다.</p>
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              {orderedDocuments.map((document, index) => (
+                <div key={document.id} onDragOver={(event) => { if (draggedDocumentId) event.preventDefault(); }} onDrop={(event) => { event.preventDefault(); if (draggedDocumentId) reorderDocuments(draggedDocumentId, document.id); setDraggedDocumentId(null); }} className={cn("flex items-center gap-3 rounded-xl border px-3 py-2.5 transition", draggedDocumentId === document.id && "scale-[.98] border-dashed border-[#b57d16] bg-[#fff8e8] opacity-70", document.status === "error" ? "border-rose-200 bg-rose-50" : document.status === "analyzing" ? "border-[#e9c66e] bg-[#fffaf0]" : "border-[#d8e7df] bg-white")}>
+                  <div draggable aria-label={`${document.name} 순서 변경`} title="끌어서 PDF 순서 변경" className="grid h-7 w-5 shrink-0 place-items-center rounded-md text-[#78958a] transition hover:bg-[#e7f1eb] hover:text-[#17352b] active:cursor-grabbing" onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", document.id); setDraggedDocumentId(document.id); }} onDragEnd={() => setDraggedDocumentId(null)}><GripVertical className="h-4 w-4" /></div>
                   <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-[#17352b] text-[11px] font-bold text-[#f4ca68]">{index + 1}</span>
                   <span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold text-[#17352b]">{document.name}</span><span className="mt-0.5 block text-[10px] text-slate-500">{document.status === "analyzing" ? "그림·본문 영역 분석 중…" : document.status === "error" ? document.error ?? "분석 실패" : `${document.candidateCount}개 후보 · ${document.selectedCount}개 포함`}</span></span>
                   {document.status === "analyzing" && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[#b57d16]" />}
                 </div>
               ))}
+              </div>
             </div>
 
             <div className="grid gap-4 p-5 md:grid-cols-2 xl:grid-cols-3 lg:p-6">
-              {pdfCandidates.map((candidate, index) => (
-                <article key={candidate.id} className={cn("overflow-hidden rounded-2xl border bg-white transition", candidate.selected ? "border-[#5a9a79] shadow-[0_8px_20px_rgba(41,103,76,.12)]" : "border-slate-200 opacity-65")}> 
-                  <CandidateBoundaryEditor source={candidate.pagePreview} crop={candidate.crop} textRegions={candidate.textRegions} showTextOverlay={showTextOverlay} documentLabel={`${candidate.documentName} · ${candidate.pageNumber}쪽 · 후보 ${index + 1}`} detection={candidate.detection} onCommit={(crop) => void updateCandidateBoundary(candidate.id, crop)} />
+              {orderedCandidates.map((candidate) => (
+                <article key={candidate.id} onDragOver={(event) => { if (draggedCandidateId) event.preventDefault(); }} onDrop={(event) => { event.preventDefault(); if (draggedCandidateId) reorderCandidates(draggedCandidateId, candidate.id); setDraggedCandidateId(null); }} className={cn("overflow-hidden rounded-2xl border bg-white transition", draggedCandidateId === candidate.id && "scale-[.98] border-dashed border-[#b57d16] bg-[#fff8e8] opacity-70", candidate.selected ? "border-[#5a9a79] shadow-[0_8px_20px_rgba(41,103,76,.12)]" : "border-slate-200 opacity-65")}> 
+                  <CandidateBoundaryEditor source={candidate.pagePreview} crop={candidate.crop} textRegions={candidate.textRegions} showTextOverlay={showTextOverlay} documentLabel={`${candidate.documentName} · ${candidate.pageNumber}쪽 · 후보 ${candidate.candidateOrder + 1}`} detection={candidate.detection} onCommit={(crop) => void updateCandidateBoundary(candidate.id, crop)} />
                   <div className="p-3">
                     <div className="flex items-start gap-3">
                       <img className="h-16 w-20 rounded-lg border border-slate-200 bg-[#fafbf9] object-contain" src={candidate.source} alt={`${candidate.label} 추출 이미지`} />
-                      <div className="min-w-0 flex-1"><p className="truncate text-xs font-bold text-slate-700">{candidate.label}</p><p className="mt-1 text-[11px] leading-4 text-slate-500"><PencilRuler className="mr-1 inline h-3 w-3 text-[#b57d16]" />노란 경계를 드래그하고 모서리를 움직여 추출 영역을 보정합니다.</p></div>
+                      <div className="min-w-0 flex-1"><div className="flex items-center gap-1"><div draggable aria-label={`${candidate.label} 순서 변경`} title="끌어서 그림 후보 순서 변경" className="grid h-6 w-5 shrink-0 place-items-center rounded-md text-[#78958a] transition hover:bg-[#e7f1eb] hover:text-[#17352b] active:cursor-grabbing" onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", candidate.id); setDraggedCandidateId(candidate.id); }} onDragEnd={() => setDraggedCandidateId(null)}><GripVertical className="h-4 w-4" /></div><p className="truncate text-xs font-bold text-slate-700">{candidate.label}</p></div><p className="mt-1 text-[11px] leading-4 text-slate-500"><PencilRuler className="mr-1 inline h-3 w-3 text-[#b57d16]" />손잡이로 후보 순서를 바꾸고, 노란 경계로 추출 영역을 보정합니다.</p></div>
                     </div>
                     <Button variant={candidate.selected ? "default" : "outline"} className={cn("mt-3 h-8 w-full rounded-lg text-xs", candidate.selected ? "bg-[#17352b] text-white hover:bg-[#244b3d]" : "border-slate-200 text-slate-600")} onClick={() => toggleCandidate(candidate.id)}>{candidate.selected ? <Check className="mr-1.5 h-3.5 w-3.5" /> : <X className="mr-1.5 h-3.5 w-3.5" />}{candidate.selected ? "변환에 포함" : "변환에서 제외"}</Button>
                   </div>
@@ -1517,7 +1583,7 @@ export default function Home() {
               <span className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-[#315c4d] shadow-sm">{learningFlow.length}개 학습 단위 · {learningFlow.reduce((total, entry) => total + entry.pageIds.length, 0)}개 촉각 페이지</span>
             </div>
             <div className="space-y-0 divide-y divide-[#e3ece7]">
-              {learningFlow.slice().sort((left, right) => left.documentOrder - right.documentOrder || left.pageNumber - right.pageNumber).map((entry, index) => {
+              {learningFlow.slice().sort((left, right) => left.documentOrder - right.documentOrder || left.candidateOrder - right.candidateOrder).map((entry, index) => {
                 const tactilePages = entry.pageIds.map((pageId) => pages.find((page) => page.id === pageId)).filter((page): page is TactilePage => Boolean(page));
                 return (
                   <article key={entry.id} className="grid gap-4 px-5 py-5 lg:grid-cols-[42px_148px_minmax(0,1fr)_minmax(280px,.95fr)] lg:items-center lg:px-6">

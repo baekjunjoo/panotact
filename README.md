@@ -1,4 +1,4 @@
-# Tactile Atlas
+# Panotact
 
 A browser-based editor for transforming images and PDF figure candidates into **60 × 40 Dot Pad DTMS tactile graphics**.
 

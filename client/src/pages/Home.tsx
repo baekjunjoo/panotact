@@ -1478,7 +1478,7 @@ export default function Home() {
     <div className="archive-shell min-h-screen bg-white text-[#111]">
       <header className="archive-header border-b border-[#111] bg-white">
         <div className="mx-auto flex max-w-[1800px] items-center justify-between gap-3 px-4 py-3 sm:px-6">
-          <div className="flex min-w-0 items-baseline gap-3"><h1 className="text-base font-bold tracking-[-.04em]">tactile atlas</h1><span className="hidden text-[10px] uppercase tracking-[.12em] text-zinc-500 sm:inline">DTMS · 60 × 40</span></div>
+          <div className="flex min-w-0 items-baseline gap-3"><h1 className="text-base font-bold tracking-[-.04em]">panotact</h1><span className="hidden text-[10px] uppercase tracking-[.12em] text-zinc-500 sm:inline">DTMS · 60 × 40</span></div>
           <div className="flex items-center gap-1.5">
             <span aria-live="polite" className="sr-only">{savedLabel}</span>
             <Button size="icon" variant="outline" className="archive-icon-button" title="현재 작업 임시 저장" aria-label="현재 작업 임시 저장" onClick={saveTemporaryDraftNow} disabled={isSavingDraft}><Save className={cn("h-4 w-4", isSavingDraft && "animate-pulse")} /></Button>
@@ -1491,7 +1491,7 @@ export default function Home() {
 
       <main className="mx-auto max-w-[1800px] px-4 py-4 sm:px-6">
         <section className="mb-4 grid border border-[#111] sm:grid-cols-[1fr_auto]">
-          <div className="p-4 sm:p-5"><p className="text-xs font-medium uppercase tracking-[.12em] text-zinc-500">image to tactile diagram</p><p className="mt-1 text-xl font-bold tracking-[-.05em] sm:text-2xl">Tactile Atlas</p></div>
+          <div className="p-4 sm:p-5"><p className="text-xs font-medium uppercase tracking-[.12em] text-zinc-500">image to tactile diagram</p><p className="mt-1 text-xl font-bold tracking-[-.05em] sm:text-2xl">Panotact</p></div>
           <div className="flex border-t border-[#111] sm:border-l sm:border-t-0">
             <input ref={uploadRef} aria-label="이미지 또는 PDF 파일 선택" type="file" accept="image/png,image/jpeg,image/webp,application/pdf" className="pointer-events-none absolute h-px w-px opacity-0" onChange={(event) => handleFile(event.target.files?.[0])} />
             <input ref={batchUploadRef} aria-label="여러 PDF 파일 대기열 선택" type="file" accept="application/pdf,.pdf" multiple className="pointer-events-none absolute h-px w-px opacity-0" onChange={(event) => { void handlePdfBatch(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} />

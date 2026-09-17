@@ -1,9 +1,9 @@
 # Validation notes
 
-The crop and PDF extraction upgrade passed TypeScript checking and the production build.
+The precision, history, and OCR upgrade passed `pnpm check` and the production build.
 
-A browser test uploaded an illustrative image, then operated the visible crop controls. The southeast resize handle changed the crop width from 50% to 50.7308%, and the rotation handle changed the crop from 0° to 100°. Both changes committed to the active focus crop and caused its tactile page to refresh.
+A browser test generated a three-page tactile workflow from an image, set the focus-crop width by exact numeric input from 50% to 63.4%, then used the toolbar controls to undo it back to 50% and redo it to 63.4%. This verifies precise input and reversible workspace history. The focus crop supports separate width and height values at 0.1% precision and rotation at 1° precision; the move, resize, and rotation handles remain available on the source-image overlay.
 
-A one-page PDF containing two spatially separated filled rectangles was rendered in the browser and automatically detected as two visual regions. The application created six separate pages—three tactile pages for each source image—and the regenerated page titles correctly identified `그림 1` and `그림 2`.
+A PDF containing one native text heading and two spatially separated graphic rectangles produced exactly two source-image regions and six tactile pages. Native PDF text bounding boxes were excluded before visual-region detection. For pages without a native text layer, the application loads Tesseract.js dynamically, requests word-level OCR blocks for Korean and English, removes recognized word boxes from the visual mask, and then falls back safely if OCR is unavailable. A scanned-style, no-text-layer PDF import completed successfully with its two visual regions isolated into six tactile pages.
 
-DTMS export retains the current page order, user edits, Korean grade-2 language metadata, and one 60×40 `bitmapHex` entry for every page.
+DTMS export remains unchanged: it preserves the current page sequence and edits as Korean grade-2 metadata plus one 60×40 `bitmapHex` value per page.

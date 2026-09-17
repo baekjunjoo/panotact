@@ -20,6 +20,8 @@ import {
   RotateCcw,
   ScanSearch,
   Trash2,
+  Redo2,
+  Undo2,
   Upload,
   WandSparkles,
 } from "lucide-react";
@@ -62,6 +64,12 @@ type TactilePage = {
   source?: string;
   sourceKey?: string;
   crop?: Crop;
+};
+
+type WorkspaceSnapshot = {
+  pages: TactilePage[];
+  sourceSets: SourceSet[];
+  selectedId: string;
 };
 
 function createId() {
@@ -428,7 +436,12 @@ export default function Home() {
   const [isFocusing, setIsFocusing] = useState(false);
   const [status, setStatus] = useState("이미지 또는 PDF를 올리면 3개의 촉각 구조도 초안을 만듭니다.");
   const [isDrawing, setIsDrawing] = useState(false);
+  const [undoCount, setUndoCount] = useState(0);
+  const [redoCount, setRedoCount] = useState(0);
   const uploadRef = useRef<HTMLInputElement>(null);
+  const undoStackRef = useRef<WorkspaceSnapshot[]>([]);
+  const redoStackRef = useRef<WorkspaceSnapshot[]>([]);
+  const focusRenderRef = useRef(0);
 
   const activePage = useMemo(
     () => pages.find((page) => page.id === selectedId) ?? pages[0],
@@ -439,6 +452,56 @@ export default function Home() {
     return sourceSets.find((sourceSet) => sourceSet.id === sourceKey) ?? sourceSets[0];
   }, [activePage?.sourceKey, sourceSets]);
   const sourceImage = activePage?.source ?? activeSourceSet?.source;
+
+  function makeSnapshot(): WorkspaceSnapshot {
+    return {
+      pages: pages.map((page) => ({ ...page, grid: cloneGrid(page.grid), crop: page.crop ? { ...page.crop } : undefined })),
+      sourceSets: sourceSets.map((sourceSet) => ({
+        ...sourceSet,
+        selectedCrop: { ...sourceSet.selectedCrop },
+        candidates: sourceSet.candidates.map((candidate) => ({ ...candidate, crop: { ...candidate.crop } })),
+      })),
+      selectedId,
+    };
+  }
+
+  function recordHistory() {
+    undoStackRef.current = [...undoStackRef.current.slice(-29), makeSnapshot()];
+    redoStackRef.current = [];
+    setUndoCount(undoStackRef.current.length);
+    setRedoCount(0);
+  }
+
+  function restoreSnapshot(snapshot: WorkspaceSnapshot) {
+    focusRenderRef.current += 1;
+    setPages(snapshot.pages.map((page) => ({ ...page, grid: cloneGrid(page.grid), crop: page.crop ? { ...page.crop } : undefined })));
+    setSourceSets(snapshot.sourceSets.map((sourceSet) => ({
+      ...sourceSet,
+      selectedCrop: { ...sourceSet.selectedCrop },
+      candidates: sourceSet.candidates.map((candidate) => ({ ...candidate, crop: { ...candidate.crop } })),
+    })));
+    setSelectedId(snapshot.selectedId);
+  }
+
+  function undoWorkspace() {
+    const previous = undoStackRef.current.pop();
+    if (!previous) return;
+    redoStackRef.current = [...redoStackRef.current, makeSnapshot()];
+    restoreSnapshot(previous);
+    setUndoCount(undoStackRef.current.length);
+    setRedoCount(redoStackRef.current.length);
+    setStatus("직전 작업을 되돌렸습니다.");
+  }
+
+  function redoWorkspace() {
+    const next = redoStackRef.current.pop();
+    if (!next) return;
+    undoStackRef.current = [...undoStackRef.current, makeSnapshot()];
+    restoreSnapshot(next);
+    setUndoCount(undoStackRef.current.length);
+    setRedoCount(redoStackRef.current.length);
+    setStatus("되돌린 작업을 다시 적용했습니다.");
+  }
 
   function updateActivePage(patch: Partial<TactilePage>) {
     if (!activePage) return;
@@ -470,6 +533,7 @@ export default function Home() {
   function handleGridPointerDown(event: React.PointerEvent<HTMLDivElement>) {
     event.currentTarget.setPointerCapture(event.pointerId);
     const { x, y } = pointerToDot(event);
+    recordHistory();
     setIsDrawing(true);
     applyAt(x, y);
   }
@@ -525,9 +589,11 @@ export default function Home() {
   }
 
   async function refreshFocusPage(sourceSet: SourceSet) {
+    const requestId = ++focusRenderRef.current;
     setIsFocusing(true);
     try {
       const grid = await gridFor(sourceSet.source, sourceSet.selectedCrop, "focus");
+      if (requestId !== focusRenderRef.current) return;
       setPages((current) =>
         current.map((page) =>
           page.sourceKey === sourceSet.id && page.kind === "focus"
@@ -539,7 +605,7 @@ export default function Home() {
     } catch {
       setStatus("핵심 부위 확대를 만들 수 없습니다. 다른 위치를 선택해 주세요.");
     } finally {
-      setIsFocusing(false);
+      if (requestId === focusRenderRef.current) setIsFocusing(false);
     }
   }
 
@@ -555,7 +621,43 @@ export default function Home() {
     };
   }
 
-  function detectVisualRegions(canvas: HTMLCanvasElement): Crop[] {
+  async function textLayerRegions(pdfPage: { getTextContent: () => Promise<{ items: unknown[] }> }, viewport: { width: number; height: number; scale: number }) {
+    const content = await pdfPage.getTextContent();
+    return content.items.flatMap((item) => {
+      if (!item || typeof item !== "object" || !("str" in item) || !("transform" in item) || !("width" in item) || !("height" in item)) return [];
+      const textItem = item as { str: string; transform: number[]; width: number; height: number };
+      if (!textItem.str.trim()) return [];
+      const [,, , transformHeight, transformX, transformY] = textItem.transform;
+      const height = Math.max(9, Math.abs(textItem.height || transformHeight) * viewport.scale);
+      const width = Math.max(6, Math.abs(textItem.width) * viewport.scale);
+      return [{ x: transformX * viewport.scale, y: viewport.height - transformY * viewport.scale - height, width, height }];
+    });
+  }
+
+  async function ocrRegions(canvas: HTMLCanvasElement) {
+    let worker: { recognize: (image: HTMLCanvasElement, options?: object, output?: { blocks?: boolean }) => Promise<{ data: { blocks: Array<{ paragraphs: Array<{ lines: Array<{ words: Array<{ text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }> }> }> }> | null } }>; terminate: () => Promise<unknown> } | undefined;
+    try {
+      const { createWorker } = await import("tesseract.js");
+      worker = await createWorker("kor+eng", undefined, { logger: () => undefined });
+      const result = await worker.recognize(canvas, {}, { blocks: true });
+      const words: Array<{ text: string; confidence: number; bbox: { x0: number; y0: number; x1: number; y1: number } }> = [];
+      const blocks = result.data.blocks ?? [];
+      blocks.forEach((block) => {
+        block.paragraphs.forEach((paragraph) => {
+          paragraph.lines.forEach((line) => words.push(...line.words));
+        });
+      });
+      await worker.terminate();
+      return words
+        .filter((word) => word.text.trim() && word.confidence >= 35)
+        .map((word) => ({ x: word.bbox.x0, y: word.bbox.y0, width: word.bbox.x1 - word.bbox.x0, height: word.bbox.y1 - word.bbox.y0 }));
+    } catch {
+      await worker?.terminate().catch(() => undefined);
+      return [];
+    }
+  }
+
+  function detectVisualRegions(canvas: HTMLCanvasElement, excludedTextRegions: Array<{ x: number; y: number; width: number; height: number }> = []): Crop[] {
     const analysisWidth = 180;
     const analysisHeight = Math.max(80, Math.round((canvas.height / canvas.width) * analysisWidth));
     const analysisCanvas = document.createElement("canvas");
@@ -572,6 +674,10 @@ export default function Home() {
 
     for (let y = 0; y < analysisHeight; y += 1) {
       for (let x = 0; x < analysisWidth; x += 1) {
+        const originalX = (x / analysisWidth) * canvas.width;
+        const originalY = (y / analysisHeight) * canvas.height;
+        const isTextPixel = excludedTextRegions.some((region) => originalX >= region.x - 8 && originalX <= region.x + region.width + 8 && originalY >= region.y - 8 && originalY <= region.y + region.height + 8);
+        if (isTextPixel) continue;
         const color = pixel(imageData, x, y);
         const colorful = Math.max(color[0], color[1], color[2]) - Math.min(color[0], color[1], color[2]) > 18;
         ink[y][x] = luminance(color) < 232 || colorful;
@@ -726,7 +832,13 @@ export default function Home() {
       const context = canvas.getContext("2d", { alpha: false });
       if (!context) throw new Error("PDF 캔버스를 만들 수 없습니다.");
       await pdfPage.render({ canvas, canvasContext: context, viewport }).promise;
-      const regions = detectVisualRegions(canvas);
+      const nativeText = await textLayerRegions(pdfPage, viewport);
+      let excludedText = nativeText;
+      if (!nativeText.length) {
+        setStatus(`PDF ${pageNumber}/${pdfDocument.numPages} 페이지의 문자 영역을 OCR로 인식 중…`);
+        excludedText = await ocrRegions(canvas);
+      }
+      const regions = detectVisualRegions(canvas, excludedText);
       if (regions.length) {
         setStatus(`PDF ${pageNumber}/${pdfDocument.numPages} 페이지에서 ${regions.length}개 그림 영역을 분리했습니다…`);
         regions.forEach((region, index) => {
@@ -767,6 +879,7 @@ export default function Home() {
       setStatus("전체 형태·구조 구분·핵심 부위 확대 초안을 만들고 있습니다…");
       const sets = await Promise.all(sources.map(createSourceSet));
       const generated = await makeAutoPages(sets);
+      recordHistory();
       setSourceSets(sets);
       setPages(generated);
       setSelectedId(generated[0].id);
@@ -789,6 +902,7 @@ export default function Home() {
       const currentSourceKey = activePage?.sourceKey;
       const currentKind = activePage?.kind;
       const generated = await makeAutoPages(sourceSets);
+      recordHistory();
       setPages(generated);
       const replacement = generated.find((page) => page.sourceKey === currentSourceKey && page.kind === currentKind) ?? generated[0];
       setSelectedId(replacement.id);
@@ -802,6 +916,7 @@ export default function Home() {
 
   function selectFocusCrop(crop: Crop) {
     if (!activeSourceSet) return;
+    recordHistory();
     const updatedSet = { ...activeSourceSet, selectedCrop: constrainCrop(crop) };
     setSourceSets((current) => current.map((item) => (item.id === updatedSet.id ? updatedSet : item)));
     void refreshFocusPage(updatedSet);
@@ -846,12 +961,14 @@ export default function Home() {
 
   function resetActiveGrid() {
     if (!activePage) return;
+    recordHistory();
     updateActivePage({ grid: EMPTY_GRID() });
     setStatus("현재 페이지의 점을 모두 지웠습니다. 원본과 페이지 설정은 유지됩니다.");
   }
 
   function addBlankPage() {
     const page = createBlankPage(`수동 촉각 도식 ${pages.length + 1}`);
+    recordHistory();
     setPages((current) => [...current, page]);
     setSelectedId(page.id);
   }
@@ -859,6 +976,7 @@ export default function Home() {
   function duplicatePage() {
     if (!activePage) return;
     const copy = { ...activePage, id: createId(), title: `${activePage.title} 복사본`, grid: cloneGrid(activePage.grid) };
+    recordHistory();
     setPages((current) => [...current, copy]);
     setSelectedId(copy.id);
   }
@@ -870,6 +988,7 @@ export default function Home() {
     }
     const index = pages.findIndex((page) => page.id === activePage.id);
     const next = pages.filter((page) => page.id !== activePage.id);
+    recordHistory();
     setPages(next);
     setSelectedId(next[Math.max(0, index - 1)].id);
   }
@@ -890,9 +1009,13 @@ export default function Home() {
           <div className="hidden items-center gap-2 text-xs text-slate-500 md:flex">
             <span className="h-2 w-2 rounded-full bg-emerald-500" /> 브라우저 안에서만 처리됩니다
           </div>
-          <Button className="rounded-xl bg-[#17352b] px-4 text-white hover:bg-[#244b3d]" onClick={downloadDtms}>
-            <Download className="mr-2 h-4 w-4" /> DTMS 저장
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button size="icon" variant="outline" className="h-9 w-9 rounded-xl border-slate-200 bg-white" title="실행 취소" aria-label="실행 취소" onClick={undoWorkspace} disabled={!undoCount}><Undo2 className="h-4 w-4" /></Button>
+            <Button size="icon" variant="outline" className="h-9 w-9 rounded-xl border-slate-200 bg-white" title="다시 실행" aria-label="다시 실행" onClick={redoWorkspace} disabled={!redoCount}><Redo2 className="h-4 w-4" /></Button>
+            <Button className="rounded-xl bg-[#17352b] px-4 text-white hover:bg-[#244b3d]" onClick={downloadDtms}>
+              <Download className="mr-2 h-4 w-4" /> DTMS 저장
+            </Button>
+          </div>
         </div>
       </header>
 
@@ -936,7 +1059,7 @@ export default function Home() {
                   })}
                 </div>
                 <div className="mt-5 border-t border-slate-100 pt-4">
-                  <div className="flex items-center justify-between"><p className="text-xs font-bold text-slate-700">확대 범위</p><span className="text-[11px] text-slate-500">60×40 비율 고정</span></div>
+                  <div className="flex items-center justify-between"><p className="text-xs font-bold text-slate-700">확대 범위</p><span className="text-[11px] text-slate-500">가로·세로 독립 조절</span></div>
                   <div className="mt-2 grid grid-cols-3 gap-2">
                     {[
                       ["좁게", 0.34],
@@ -948,11 +1071,11 @@ export default function Home() {
                   </div>
                 </div>
                 <div className="mt-4 grid grid-cols-2 gap-3 border-t border-slate-100 pt-4">
-                  <CropSlider label="가로" value={Math.round(activeSourceSet.selectedCrop.width * 100)} min={12} max={96} suffix="%" onChange={(value) => updateFocusCrop({ width: value / 100 })} />
-                  <CropSlider label="세로" value={Math.round(activeSourceSet.selectedCrop.height * 100)} min={12} max={96} suffix="%" onChange={(value) => updateFocusCrop({ height: value / 100 })} />
+                  <CropSlider label="가로" value={Number((activeSourceSet.selectedCrop.width * 100).toFixed(1))} min={12} max={96} step={0.1} suffix="%" onChange={(value) => updateFocusCrop({ width: value / 100 })} />
+                  <CropSlider label="세로" value={Number((activeSourceSet.selectedCrop.height * 100).toFixed(1))} min={12} max={96} step={0.1} suffix="%" onChange={(value) => updateFocusCrop({ height: value / 100 })} />
                 </div>
                 <div className="mt-3 border-t border-slate-100 pt-4">
-                  <CropSlider label="회전" value={Math.round(activeSourceSet.selectedCrop.rotation)} min={-180} max={180} step={5} suffix="°" onChange={(value) => updateFocusCrop({ rotation: value })} />
+                  <CropSlider label="회전" value={Math.round(activeSourceSet.selectedCrop.rotation)} min={-180} max={180} step={1} suffix="°" onChange={(value) => updateFocusCrop({ rotation: value })} />
                 </div>
                 <div className="mt-auto rounded-xl bg-[#17352b] px-3 py-3 text-xs leading-5 text-white/80">
                   <Maximize2 className="mr-1.5 inline h-3.5 w-3.5 text-[#f4ca68]" />
@@ -1045,9 +1168,9 @@ export default function Home() {
               <div className="rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="mb-3 flex items-center gap-2"><FileText className="h-4 w-4 text-[#507366]" /><p className="text-sm font-bold text-slate-800">DTMS 설명</p></div>
                 <Label htmlFor="page-title" className="text-xs font-semibold text-slate-600">페이지 제목</Label>
-                <Input id="page-title" className="mt-1.5 rounded-xl border-slate-200" value={activePage?.title ?? ""} onChange={(event) => updateActivePage({ title: event.target.value })} />
+                <Input id="page-title" className="mt-1.5 rounded-xl border-slate-200" value={activePage?.title ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ title: event.target.value })} />
                 <Label htmlFor="alt-text" className="mt-4 block text-xs font-semibold text-slate-600">대체 설명</Label>
-                <Textarea id="alt-text" className="mt-1.5 min-h-24 rounded-xl border-slate-200 text-sm" placeholder="이 촉각 도식에 표시한 구조와 위치 관계를 간략히 설명하세요." value={activePage?.altText ?? ""} onChange={(event) => updateActivePage({ altText: event.target.value })} />
+                <Textarea id="alt-text" className="mt-1.5 min-h-24 rounded-xl border-slate-200 text-sm" placeholder="이 촉각 도식에 표시한 구조와 위치 관계를 간략히 설명하세요." value={activePage?.altText ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ altText: event.target.value })} />
               </div>
               <div className="rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="mb-3 flex items-center gap-2"><CircleHelp className="h-4 w-4 text-[#507366]" /><p className="text-sm font-bold text-slate-800">내보내기 전 확인</p></div>
@@ -1075,7 +1198,7 @@ export default function Home() {
               <input ref={uploadRef} aria-label="이미지 또는 PDF 파일 선택" type="file" accept="image/png,image/jpeg,image/webp,application/pdf" className="pointer-events-none absolute h-px w-px opacity-0" onChange={(event) => handleFile(event.target.files?.[0])} />
               <div className="grid h-10 w-10 place-items-center rounded-xl bg-white text-[#2d7056] shadow-sm"><ImageUp className="h-5 w-5" /></div>
               <h2 className="mt-3 text-sm font-bold text-[#17352b]">원본 불러오기</h2>
-              <p className="mt-1 text-xs leading-5 text-[#527267]">PNG, JPG, WebP 또는 PDF 전체 페이지에서 3단계 촉각 구조도를 만듭니다.</p>
+              <p className="mt-1 text-xs leading-5 text-[#527267]">PNG, JPG, WebP 또는 PDF 전체 페이지에서 3단계 촉각 구조도를 만듭니다. PDF는 텍스트 레이어를 제외하고, 스캔본은 OCR로 문자 영역을 찾습니다.</p>
               <Button className="mt-4 w-full rounded-xl bg-[#17352b] text-white hover:bg-[#244b3d]" onClick={() => uploadRef.current?.click()} disabled={isLoading}>{isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}{isLoading ? "분석 중…" : "파일 선택"}</Button>
               <p aria-live="polite" className="mt-3 text-[11px] leading-4 text-[#527267]">{status}</p>
             </section>
@@ -1201,7 +1324,7 @@ function FocusPicker({ source, crop, onSelectCenter, onCommit }: { source: strin
 }
 
 function CropSlider({ label, value, min, max, step = 1, suffix, onChange }: { label: string; value: number; min: number; max: number; step?: number; suffix: string; onChange: (value: number) => void }) {
-  return <div><div className="flex items-center justify-between"><p className="text-[11px] font-bold text-slate-600">{label}</p><span className="text-[10px] font-bold text-[#315c4d]">{value}{suffix}</span></div><Slider className="mt-2" min={min} max={max} step={step} value={[value]} onValueChange={([next]) => onChange(next)} /></div>;
+  return <div><div className="flex items-center justify-between gap-2"><p className="text-[11px] font-bold text-slate-600">{label}</p><label className="flex items-center gap-1 text-[10px] font-bold text-[#315c4d]"><Input aria-label={`${label} 정밀 수치`} type="number" className="h-6 w-15 rounded-md border-[#cfe0d7] bg-white px-1.5 text-right text-[10px]" min={min} max={max} step={step} value={value} onChange={(event) => { const next = Number(event.target.value); if (Number.isFinite(next)) onChange(clamp(next, min, max)); }} />{suffix}</label></div><Slider className="mt-2" min={min} max={max} step={step} value={[value]} onValueChange={([next]) => onChange(next)} /></div>;
 }
 
 function MiniGrid({ grid }: { grid: boolean[][] }) {

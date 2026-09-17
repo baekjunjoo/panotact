@@ -6,6 +6,8 @@ import {
   CircleHelp,
   Download,
   Eraser,
+  Eye,
+  EyeOff,
   FileImage,
   FilePlus2,
   FileText,
@@ -19,11 +21,13 @@ import {
   RefreshCw,
   RotateCcw,
   ScanSearch,
+  Save,
   Trash2,
   Redo2,
   Undo2,
   Upload,
   WandSparkles,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -49,6 +53,18 @@ type PageKind = "overall" | "structure" | "focus" | "manual";
 type Crop = { x: number; y: number; width: number; height: number; rotation: number };
 type FocusCandidate = { id: string; label: string; crop: Crop; score: number };
 type SourceInput = { source: string; label: string };
+type TextRegion = { x: number; y: number; width: number; height: number };
+type PdfFigureCandidate = {
+  id: string;
+  source: string;
+  label: string;
+  pageNumber: number;
+  crop: Crop;
+  selected: boolean;
+  textRegions: TextRegion[];
+  pagePreview: string;
+  detection: "native" | "ocr" | "none";
+};
 type SourceSet = SourceInput & {
   id: string;
   aspect: number;
@@ -71,6 +87,23 @@ type WorkspaceSnapshot = {
   sourceSets: SourceSet[];
   selectedId: string;
 };
+
+type TemporaryDraft = {
+  version: 1;
+  savedAt: number;
+  pages: TactilePage[];
+  sourceSets: SourceSet[];
+  selectedId: string;
+  fileTitle: string;
+  settings: { threshold: number; mode: ConversionMode; simplification: number; invert: boolean };
+  pdfCandidates: PdfFigureCandidate[];
+  reviewFileName: string;
+  showTextOverlay?: boolean;
+};
+
+const DRAFT_DATABASE = "tactile-dtms-studio";
+const DRAFT_STORE = "drafts";
+const DRAFT_KEY = "current-workspace";
 
 function createId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -120,6 +153,56 @@ function constrainCrop(crop: Crop): Crop {
     height,
     rotation: clamp(crop.rotation, -180, 180),
   };
+}
+
+function copySourceSet(sourceSet: SourceSet): SourceSet {
+  return {
+    ...sourceSet,
+    selectedCrop: { ...sourceSet.selectedCrop },
+    candidates: sourceSet.candidates.map((candidate) => ({ ...candidate, crop: { ...candidate.crop } })),
+  };
+}
+
+function copyPage(page: TactilePage): TactilePage {
+  return { ...page, grid: cloneGrid(page.grid), crop: page.crop ? { ...page.crop } : undefined };
+}
+
+function openDraftDatabase() {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    const request = indexedDB.open(DRAFT_DATABASE, 1);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(DRAFT_STORE)) request.result.createObjectStore(DRAFT_STORE);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function getTemporaryDraft() {
+  const database = await openDraftDatabase();
+  return new Promise<TemporaryDraft | undefined>((resolve, reject) => {
+    const request = database.transaction(DRAFT_STORE, "readonly").objectStore(DRAFT_STORE).get(DRAFT_KEY);
+    request.onsuccess = () => { database.close(); resolve(request.result as TemporaryDraft | undefined); };
+    request.onerror = () => { database.close(); reject(request.error); };
+  });
+}
+
+async function putTemporaryDraft(draft: TemporaryDraft) {
+  const database = await openDraftDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const request = database.transaction(DRAFT_STORE, "readwrite").objectStore(DRAFT_STORE).put(draft, DRAFT_KEY);
+    request.onsuccess = () => { database.close(); resolve(); };
+    request.onerror = () => { database.close(); reject(request.error); };
+  });
+}
+
+async function removeTemporaryDraft() {
+  const database = await openDraftDatabase();
+  return new Promise<void>((resolve, reject) => {
+    const request = database.transaction(DRAFT_STORE, "readwrite").objectStore(DRAFT_STORE).delete(DRAFT_KEY);
+    request.onsuccess = () => { database.close(); resolve(); };
+    request.onerror = () => { database.close(); reject(request.error); };
+  });
 }
 
 function gridToBitmapHex(grid: boolean[][]) {
@@ -438,10 +521,17 @@ export default function Home() {
   const [isDrawing, setIsDrawing] = useState(false);
   const [undoCount, setUndoCount] = useState(0);
   const [redoCount, setRedoCount] = useState(0);
+  const [pdfCandidates, setPdfCandidates] = useState<PdfFigureCandidate[]>([]);
+  const [reviewFileName, setReviewFileName] = useState("");
+  const [showTextOverlay, setShowTextOverlay] = useState(false);
+  const [autosaveReady, setAutosaveReady] = useState(false);
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
   const uploadRef = useRef<HTMLInputElement>(null);
   const undoStackRef = useRef<WorkspaceSnapshot[]>([]);
   const redoStackRef = useRef<WorkspaceSnapshot[]>([]);
   const focusRenderRef = useRef(0);
+  const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activePage = useMemo(
     () => pages.find((page) => page.id === selectedId) ?? pages[0],
@@ -452,6 +542,80 @@ export default function Home() {
     return sourceSets.find((sourceSet) => sourceSet.id === sourceKey) ?? sourceSets[0];
   }, [activePage?.sourceKey, sourceSets]);
   const sourceImage = activePage?.source ?? activeSourceSet?.source;
+  const savedLabel = lastSavedAt ? `임시 저장됨 · ${new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit" }).format(lastSavedAt)}` : "자동 임시 저장 준비됨";
+
+  function buildTemporaryDraft(): TemporaryDraft {
+    return {
+      version: 1,
+      savedAt: Date.now(),
+      pages: pages.map(copyPage),
+      sourceSets: sourceSets.map(copySourceSet),
+      selectedId,
+      fileTitle,
+      settings: { threshold, mode, simplification, invert },
+      pdfCandidates: pdfCandidates.map((candidate) => ({ ...candidate, crop: { ...candidate.crop }, textRegions: candidate.textRegions.map((region) => ({ ...region })) })),
+      reviewFileName,
+      showTextOverlay,
+    };
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    void getTemporaryDraft()
+      .then((draft) => {
+        if (cancelled || !draft || draft.version !== 1) return;
+        if (draft.pages.length) {
+          setPages(draft.pages.map(copyPage));
+          setSelectedId(draft.selectedId);
+          setSourceSets(draft.sourceSets.map(copySourceSet));
+          setFileTitle(draft.fileTitle);
+          setThreshold(draft.settings.threshold);
+          setMode(draft.settings.mode);
+          setSimplification(draft.settings.simplification);
+          setInvert(draft.settings.invert);
+          setPdfCandidates(draft.pdfCandidates ?? []);
+          setReviewFileName(draft.reviewFileName ?? "");
+          setShowTextOverlay(Boolean(draft.showTextOverlay));
+          setLastSavedAt(draft.savedAt);
+          setStatus("브라우저 임시 저장 작업을 복원했습니다.");
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => { if (!cancelled) setAutosaveReady(true); });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!autosaveReady) return;
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = setTimeout(() => {
+      void putTemporaryDraft(buildTemporaryDraft())
+        .then(() => setLastSavedAt(Date.now()))
+        .catch(() => undefined);
+    }, 850);
+    return () => { if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current); };
+  }, [pages, sourceSets, selectedId, fileTitle, threshold, mode, simplification, invert, pdfCandidates, reviewFileName, showTextOverlay, autosaveReady]);
+
+  function saveTemporaryDraftNow() {
+    setIsSavingDraft(true);
+    void putTemporaryDraft(buildTemporaryDraft())
+      .then(() => {
+        setLastSavedAt(Date.now());
+        setStatus("현재 작업을 이 브라우저에 임시 저장했습니다.");
+      })
+      .catch(() => setStatus("임시 저장을 사용할 수 없습니다. 브라우저 저장소 설정을 확인해 주세요."))
+      .finally(() => setIsSavingDraft(false));
+  }
+
+  function clearTemporaryDraft() {
+    if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
+    void removeTemporaryDraft()
+      .then(() => {
+        setLastSavedAt(null);
+        setStatus("브라우저에 저장된 임시 작업을 삭제했습니다. 현재 화면의 작업은 유지됩니다.");
+      })
+      .catch(() => setStatus("임시 저장 삭제에 실패했습니다."));
+  }
 
   function makeSnapshot(): WorkspaceSnapshot {
     return {
@@ -580,7 +744,7 @@ export default function Home() {
   }
 
   async function makeAutoPages(sets: SourceSet[]) {
-    const includeSourceLabel = sets.length > 1;
+    const includeSourceLabel = sets.length > 1 || sets.some((sourceSet) => sourceSet.label.includes("병합"));
     return Promise.all(sets.flatMap((sourceSet) => [
       makeAutoPage(sourceSet, "overall", includeSourceLabel),
       makeAutoPage(sourceSet, "structure", includeSourceLabel),
@@ -818,10 +982,23 @@ export default function Home() {
     return extracted.toDataURL("image/png");
   }
 
-  async function processPdf(file: File): Promise<SourceInput[]> {
+  async function sourceFromCrop(source: string, crop: Crop) {
+    const image = await loadImage(source);
+    const extracted = document.createElement("canvas");
+    extracted.width = Math.max(1, Math.round(image.naturalWidth * crop.width));
+    extracted.height = Math.max(1, Math.round(image.naturalHeight * crop.height));
+    const context = extracted.getContext("2d");
+    if (!context) throw new Error("병합한 그림을 만들 수 없습니다.");
+    context.fillStyle = "white";
+    context.fillRect(0, 0, extracted.width, extracted.height);
+    context.drawImage(image, image.naturalWidth * crop.x, image.naturalHeight * crop.y, image.naturalWidth * crop.width, image.naturalHeight * crop.height, 0, 0, extracted.width, extracted.height);
+    return extracted.toDataURL("image/png");
+  }
+
+  async function processPdf(file: File): Promise<PdfFigureCandidate[]> {
     const data = new Uint8Array(await file.arrayBuffer());
     const pdfDocument = await pdfjsLib.getDocument({ data }).promise;
-    const sources: SourceInput[] = [];
+    const candidates: PdfFigureCandidate[] = [];
     for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
       setStatus(`PDF ${pageNumber}/${pdfDocument.numPages} 페이지를 분석 중…`);
       const pdfPage = await pdfDocument.getPage(pageNumber);
@@ -834,36 +1011,123 @@ export default function Home() {
       await pdfPage.render({ canvas, canvasContext: context, viewport }).promise;
       const nativeText = await textLayerRegions(pdfPage, viewport);
       let excludedText = nativeText;
+      let detection: PdfFigureCandidate["detection"] = nativeText.length ? "native" : "none";
       if (!nativeText.length) {
         setStatus(`PDF ${pageNumber}/${pdfDocument.numPages} 페이지의 문자 영역을 OCR로 인식 중…`);
         excludedText = await ocrRegions(canvas);
+        detection = excludedText.length ? "ocr" : "none";
       }
       const regions = detectVisualRegions(canvas, excludedText);
+      const pagePreview = canvas.toDataURL("image/png");
+      const normalizedText = excludedText.map((region) => ({
+        x: region.x / canvas.width,
+        y: region.y / canvas.height,
+        width: region.width / canvas.width,
+        height: region.height / canvas.height,
+      }));
       if (regions.length) {
         setStatus(`PDF ${pageNumber}/${pdfDocument.numPages} 페이지에서 ${regions.length}개 그림 영역을 분리했습니다…`);
         regions.forEach((region, index) => {
-          sources.push({
+          candidates.push({
+            id: createId(),
             source: sourceFromRegion(canvas, region),
             label: `${file.name.replace(/\.pdf$/i, "")} · ${pageNumber}쪽 그림 ${index + 1}`,
+            pageNumber,
+            crop: region,
+            selected: true,
+            textRegions: normalizedText,
+            pagePreview,
+            detection,
           });
         });
       } else {
-        sources.push({
-          source: canvas.toDataURL("image/png"),
+        candidates.push({
+          id: createId(),
+          source: pagePreview,
           label: `${file.name.replace(/\.pdf$/i, "")} · ${pageNumber}쪽 전체`,
+          pageNumber,
+          crop: FULL_CROP,
+          selected: true,
+          textRegions: normalizedText,
+          pagePreview,
+          detection,
         });
       }
     }
-    return sources;
+    return candidates;
+  }
+
+  async function generateSourceWorkflow(sources: SourceInput[], title: string) {
+    if (!sources.length) {
+      setStatus("변환할 그림 후보를 하나 이상 선택해 주세요.");
+      return;
+    }
+    setStatus("전체 형태·구조 구분·핵심 부위 확대 초안을 만들고 있습니다…");
+    const sets = await Promise.all(sources.map(createSourceSet));
+    const generated = await makeAutoPages(sets);
+    recordHistory();
+    setSourceSets(sets);
+    setPages(generated);
+    setSelectedId(generated[0].id);
+    setFileTitle(title);
+    setPdfCandidates([]);
+    setReviewFileName("");
+    setStatus(`${sources.length}개 원본에서 ${generated.length}개 촉각 구조도 초안을 만들었습니다. 핵심 부위를 클릭해 3번째 페이지를 바꿔 보세요.`);
+  }
+
+  function toggleCandidate(candidateId: string) {
+    setPdfCandidates((current) => current.map((candidate) => candidate.id === candidateId ? { ...candidate, selected: !candidate.selected } : candidate));
+  }
+
+  function setAllCandidates(selected: boolean) {
+    setPdfCandidates((current) => current.map((candidate) => ({ ...candidate, selected })));
+  }
+
+  async function convertReviewedCandidates(merge: boolean) {
+    const selected = pdfCandidates.filter((candidate) => candidate.selected);
+    if (!selected.length) {
+      setStatus("변환할 그림 후보를 하나 이상 선택해 주세요.");
+      return;
+    }
+    setIsGenerating(true);
+    try {
+      let sources: SourceInput[];
+      if (!merge) {
+        sources = selected.map((candidate) => ({ source: candidate.source, label: candidate.label }));
+      } else {
+        const pagesByNumber = new Map<number, PdfFigureCandidate[]>();
+        selected.forEach((candidate) => pagesByNumber.set(candidate.pageNumber, [...(pagesByNumber.get(candidate.pageNumber) ?? []), candidate]));
+        const groups: PdfFigureCandidate[][] = Array.from(pagesByNumber.values());
+        sources = await Promise.all(groups.map(async (group: PdfFigureCandidate[]) => {
+          const left = Math.min(...group.map((candidate) => candidate.crop.x));
+          const top = Math.min(...group.map((candidate) => candidate.crop.y));
+          const right = Math.max(...group.map((candidate) => candidate.crop.x + candidate.crop.width));
+          const bottom = Math.max(...group.map((candidate) => candidate.crop.y + candidate.crop.height));
+          const crop = { x: left, y: top, width: right - left, height: bottom - top, rotation: 0 };
+          return {
+            source: await sourceFromCrop(group[0].pagePreview, crop),
+            label: `${reviewFileName.replace(/\.pdf$/i, "")} · ${group[0].pageNumber}쪽 선택 그림 ${group.length}개 병합`,
+          };
+        }));
+      }
+      await generateSourceWorkflow(sources, reviewFileName.replace(/\.pdf$/i, ""));
+    } catch {
+      setStatus("선택한 그림 후보를 변환하지 못했습니다.");
+    } finally {
+      setIsGenerating(false);
+    }
   }
 
   async function handleFile(file?: File) {
     if (!file) return;
     setIsLoading(true);
     try {
-      let sources: SourceInput[] = [];
       if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
-        sources = await processPdf(file);
+        const candidates = await processPdf(file);
+        setPdfCandidates(candidates);
+        setReviewFileName(file.name);
+        setShowTextOverlay(false);
+        setStatus(`${candidates.length}개 그림 후보를 찾았습니다. 포함할 후보를 검토한 뒤 개별 또는 병합 변환을 선택해 주세요.`);
       } else if (file.type.startsWith("image/")) {
         const source = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
@@ -871,20 +1135,10 @@ export default function Home() {
           reader.onerror = () => reject(new Error("이미지를 읽을 수 없습니다."));
           reader.readAsDataURL(file);
         });
-        sources = [{ source, label: file.name.replace(/\.[^.]+$/, "") }];
+        await generateSourceWorkflow([{ source, label: file.name.replace(/\.[^.]+$/, "") }], file.name.replace(/\.[^.]+$/, ""));
       } else {
         throw new Error("PNG, JPG, WebP 또는 PDF 파일만 지원합니다.");
       }
-
-      setStatus("전체 형태·구조 구분·핵심 부위 확대 초안을 만들고 있습니다…");
-      const sets = await Promise.all(sources.map(createSourceSet));
-      const generated = await makeAutoPages(sets);
-      recordHistory();
-      setSourceSets(sets);
-      setPages(generated);
-      setSelectedId(generated[0].id);
-      setFileTitle(file.name.replace(/\.[^.]+$/, ""));
-      setStatus(`${sources.length}개 원본에서 ${generated.length}개 촉각 구조도 초안을 만들었습니다. 핵심 부위를 클릭해 3번째 페이지를 바꿔 보세요.`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "파일을 처리하지 못했습니다.");
     } finally {
@@ -1006,10 +1260,11 @@ export default function Home() {
               <p className="mt-1 text-[11px] font-medium tracking-[0.12em] text-slate-500">DOT PAD 320 · 60 × 40</p>
             </div>
           </div>
-          <div className="hidden items-center gap-2 text-xs text-slate-500 md:flex">
-            <span className="h-2 w-2 rounded-full bg-emerald-500" /> 브라우저 안에서만 처리됩니다
+          <div aria-live="polite" className="hidden items-center gap-2 text-xs text-slate-500 md:flex">
+            <span className="h-2 w-2 rounded-full bg-emerald-500" /> {savedLabel}
           </div>
           <div className="flex items-center gap-2">
+            <Button size="icon" variant="outline" className="h-9 w-9 rounded-xl border-slate-200 bg-white" title="현재 작업 임시 저장" aria-label="현재 작업 임시 저장" onClick={saveTemporaryDraftNow} disabled={isSavingDraft}><Save className={cn("h-4 w-4", isSavingDraft && "animate-pulse")} /></Button>
             <Button size="icon" variant="outline" className="h-9 w-9 rounded-xl border-slate-200 bg-white" title="실행 취소" aria-label="실행 취소" onClick={undoWorkspace} disabled={!undoCount}><Undo2 className="h-4 w-4" /></Button>
             <Button size="icon" variant="outline" className="h-9 w-9 rounded-xl border-slate-200 bg-white" title="다시 실행" aria-label="다시 실행" onClick={redoWorkspace} disabled={!redoCount}><Redo2 className="h-4 w-4" /></Button>
             <Button className="rounded-xl bg-[#17352b] px-4 text-white hover:bg-[#244b3d]" onClick={downloadDtms}>
@@ -1032,6 +1287,55 @@ export default function Home() {
             <span className="rounded-full border border-[#bdd4c9] bg-white/70 px-3 py-1.5">클릭하여 핵심 부위 선택</span>
           </div>
         </section>
+
+        {pdfCandidates.length > 0 && (
+          <section className="mb-7 overflow-hidden rounded-[24px] border border-[#b8d5c7] bg-white shadow-[0_14px_28px_rgba(31,73,57,.08)]">
+            <div className="flex flex-col gap-4 border-b border-[#dcebe3] bg-[linear-gradient(120deg,#eaf4ef_0%,#fdfbf3_100%)] px-5 py-5 lg:flex-row lg:items-center lg:justify-between lg:px-6">
+              <div className="flex gap-3">
+                <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#17352b] text-[#f4ca68]"><FileImage className="h-5 w-5" /></div>
+                <div>
+                  <p className="text-sm font-bold text-[#17352b]">PDF 그림 후보 검토</p>
+                  <p className="mt-1 text-xs leading-5 text-[#527267]"><strong>{reviewFileName}</strong>에서 감지한 {pdfCandidates.length}개 후보입니다. 포함할 그림만 고르고, 같은 페이지의 선택 그림은 하나의 원본으로 병합할 수 있습니다.</p>
+                </div>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" className="h-9 rounded-xl border-[#b7d4c5] bg-white text-xs" onClick={() => setAllCandidates(true)}>모두 포함</Button>
+                <Button variant="outline" className="h-9 rounded-xl border-[#b7d4c5] bg-white text-xs" onClick={() => setAllCandidates(false)}>모두 제외</Button>
+                <Button variant="outline" className={cn("h-9 rounded-xl border-[#b7d4c5] bg-white text-xs", showTextOverlay && "bg-[#17352b] text-white hover:bg-[#244b3d] hover:text-white")} onClick={() => setShowTextOverlay((current) => !current)}>{showTextOverlay ? <EyeOff className="mr-1.5 h-3.5 w-3.5" /> : <Eye className="mr-1.5 h-3.5 w-3.5" />}{showTextOverlay ? "본문 제외 영역 숨기기" : "본문 제외 영역 보기"}</Button>
+              </div>
+            </div>
+
+            <div className="grid gap-4 p-5 md:grid-cols-2 xl:grid-cols-3 lg:p-6">
+              {pdfCandidates.map((candidate, index) => (
+                <article key={candidate.id} className={cn("overflow-hidden rounded-2xl border bg-white transition", candidate.selected ? "border-[#5a9a79] shadow-[0_8px_20px_rgba(41,103,76,.12)]" : "border-slate-200 opacity-65")}> 
+                  <div className="relative aspect-[4/3] overflow-hidden bg-slate-100">
+                    <img className="h-full w-full object-contain" src={candidate.pagePreview} alt={`${candidate.pageNumber}쪽 PDF 원본 페이지`} />
+                    <div className="pointer-events-none absolute inset-0 bg-black/10" />
+                    {showTextOverlay && candidate.textRegions.map((region, regionIndex) => <span key={regionIndex} className="pointer-events-none absolute border border-dashed border-[#d4713e] bg-[#f6a56f]/35" style={{ left: `${region.x * 100}%`, top: `${region.y * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%` }} />)}
+                    <span className="pointer-events-none absolute border-2 border-[#f4ca68] bg-[#f4ca68]/15 shadow-[0_0_0_9999px_rgba(17,40,31,.28)]" style={{ left: `${candidate.crop.x * 100}%`, top: `${candidate.crop.y * 100}%`, width: `${candidate.crop.width * 100}%`, height: `${candidate.crop.height * 100}%` }} />
+                    <span className="absolute left-3 top-3 rounded-full bg-[#17352b] px-2 py-1 text-[10px] font-bold text-white">{candidate.pageNumber}쪽 · 후보 {index + 1}</span>
+                    {showTextOverlay && <span className="absolute bottom-3 left-3 rounded-full bg-[#d4713e] px-2 py-1 text-[10px] font-bold text-white">{candidate.detection === "ocr" ? "OCR 본문 제외" : candidate.detection === "native" ? "PDF 텍스트 제외" : "본문 영역 없음"}</span>}
+                  </div>
+                  <div className="p-3">
+                    <div className="flex items-start gap-3">
+                      <img className="h-16 w-20 rounded-lg border border-slate-200 bg-[#fafbf9] object-contain" src={candidate.source} alt={`${candidate.label} 추출 이미지`} />
+                      <div className="min-w-0 flex-1"><p className="truncate text-xs font-bold text-slate-700">{candidate.label}</p><p className="mt-1 text-[11px] leading-4 text-slate-500">노란 상자는 추출 후보, 주황 영역은 OCR 또는 PDF 텍스트 레이어에서 제외된 본문입니다.</p></div>
+                    </div>
+                    <Button variant={candidate.selected ? "default" : "outline"} className={cn("mt-3 h-8 w-full rounded-lg text-xs", candidate.selected ? "bg-[#17352b] text-white hover:bg-[#244b3d]" : "border-slate-200 text-slate-600")} onClick={() => toggleCandidate(candidate.id)}>{candidate.selected ? <Check className="mr-1.5 h-3.5 w-3.5" /> : <X className="mr-1.5 h-3.5 w-3.5" />}{candidate.selected ? "변환에 포함" : "변환에서 제외"}</Button>
+                  </div>
+                </article>
+              ))}
+            </div>
+
+            <div className="flex flex-col gap-3 border-t border-[#dcebe3] bg-[#f8fbf9] px-5 py-4 sm:flex-row sm:items-center sm:justify-between lg:px-6">
+              <p className="text-xs leading-5 text-[#527267]"><strong className="text-[#17352b]">{pdfCandidates.filter((candidate) => candidate.selected).length}개 선택됨.</strong> 개별 변환은 그림마다 3페이지를 생성하고, 병합 변환은 같은 페이지의 선택 영역을 하나의 원본으로 합칩니다.</p>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="outline" className="rounded-xl border-[#9ec3af] bg-white text-xs text-[#17352b]" onClick={() => void convertReviewedCandidates(false)} disabled={isGenerating}><FilePlus2 className="mr-1.5 h-3.5 w-3.5" />개별 변환</Button>
+                <Button className="rounded-xl bg-[#e0a93a] text-xs font-bold text-[#17352b] hover:bg-[#f1bd51]" onClick={() => void convertReviewedCandidates(true)} disabled={isGenerating}>{isGenerating ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Layers3 className="mr-1.5 h-3.5 w-3.5" />}선택 병합 변환</Button>
+              </div>
+            </div>
+          </section>
+        )}
 
         {activeSourceSet ? (
           <section className="mb-7 overflow-hidden rounded-[24px] border border-[#cadcd4] bg-white shadow-sm">
@@ -1200,6 +1504,7 @@ export default function Home() {
               <h2 className="mt-3 text-sm font-bold text-[#17352b]">원본 불러오기</h2>
               <p className="mt-1 text-xs leading-5 text-[#527267]">PNG, JPG, WebP 또는 PDF 전체 페이지에서 3단계 촉각 구조도를 만듭니다. PDF는 텍스트 레이어를 제외하고, 스캔본은 OCR로 문자 영역을 찾습니다.</p>
               <Button className="mt-4 w-full rounded-xl bg-[#17352b] text-white hover:bg-[#244b3d]" onClick={() => uploadRef.current?.click()} disabled={isLoading}>{isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}{isLoading ? "분석 중…" : "파일 선택"}</Button>
+              {lastSavedAt && <Button variant="ghost" className="mt-2 h-8 w-full rounded-lg text-[11px] text-[#527267] hover:bg-white/70 hover:text-[#17352b]" onClick={clearTemporaryDraft}><Trash2 className="mr-1.5 h-3.5 w-3.5" />브라우저 임시 저장 삭제</Button>}
               <p aria-live="polite" className="mt-3 text-[11px] leading-4 text-[#527267]">{status}</p>
             </section>
 

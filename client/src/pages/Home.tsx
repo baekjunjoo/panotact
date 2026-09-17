@@ -1476,27 +1476,27 @@ export default function Home() {
 
   return (
     <div className="archive-shell min-h-screen bg-white text-[#111]">
-      <header className="archive-header border-b border-[#111] bg-white">
-        <div className="mx-auto flex max-w-[1800px] items-center justify-between gap-3 px-4 py-3 sm:px-6">
-          <div className="flex min-w-0 items-baseline gap-3"><h1 className="text-base font-bold tracking-[-.04em]">panotact</h1><span className="hidden text-[10px] uppercase tracking-[.12em] text-zinc-500 sm:inline">DTMS · 60 × 40</span></div>
+      <header className="archive-header border-b border-zinc-200 bg-white">
+        <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-3 px-5 py-3 sm:px-12">
+          <div className="flex min-w-0 items-center gap-5"><span aria-hidden="true" className="arena-mark">✳</span><div className="flex min-w-0 items-baseline gap-2 text-sm tracking-[-.04em]"><h1 className="font-semibold">Panotact</h1><span className="hidden text-zinc-400 sm:inline">/</span><span className="hidden text-zinc-500 sm:inline">Workspace</span></div></div>
           <div className="flex items-center gap-1.5">
             <span aria-live="polite" className="sr-only">{savedLabel}</span>
-            <Button size="icon" variant="outline" className="archive-icon-button" title="현재 작업 임시 저장" aria-label="현재 작업 임시 저장" onClick={saveTemporaryDraftNow} disabled={isSavingDraft}><Save className={cn("h-4 w-4", isSavingDraft && "animate-pulse")} /></Button>
-            <Button size="icon" variant="outline" className="archive-icon-button" title="실행 취소" aria-label="실행 취소" onClick={undoWorkspace} disabled={!undoCount}><Undo2 className="h-4 w-4" /></Button>
-            <Button size="icon" variant="outline" className="archive-icon-button" title="다시 실행" aria-label="다시 실행" onClick={redoWorkspace} disabled={!redoCount}><Redo2 className="h-4 w-4" /></Button>
-            <Button className="archive-primary-button ml-1" onClick={downloadDtms}><Download className="mr-2 h-4 w-4" />DTMS</Button>
+            <Button size="icon" variant="outline" className="archive-icon-button button-morph" title="현재 작업 임시 저장" aria-label="현재 작업 임시 저장" onClick={saveTemporaryDraftNow} disabled={isSavingDraft}><Save className={cn("h-4 w-4", isSavingDraft && "animate-pulse")} /></Button>
+            <Button size="icon" variant="outline" className="archive-icon-button button-rotate" title="실행 취소" aria-label="실행 취소" onClick={undoWorkspace} disabled={!undoCount}><Undo2 className="h-4 w-4" /></Button>
+            <Button size="icon" variant="outline" className="archive-icon-button button-rotate" title="다시 실행" aria-label="다시 실행" onClick={redoWorkspace} disabled={!redoCount}><Redo2 className="h-4 w-4" /></Button>
+            <Button className="archive-primary-button button-download ml-1" onClick={downloadDtms}><Download className="mr-2 h-4 w-4" />DTMS</Button>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1800px] px-4 py-4 sm:px-6">
-        <section className="mb-4 grid border border-[#111] sm:grid-cols-[1fr_auto]">
-          <div className="p-4 sm:p-5"><p className="text-xs font-medium uppercase tracking-[.12em] text-zinc-500">image to tactile diagram</p><p className="mt-1 text-xl font-bold tracking-[-.05em] sm:text-2xl">Panotact</p></div>
-          <div className="flex border-t border-[#111] sm:border-l sm:border-t-0">
+      <main className="mx-auto max-w-[1440px] px-5 py-9 sm:px-12 sm:py-12">
+        <section className="arena-intro mb-7 grid border border-zinc-200 bg-[#f7f7f7] sm:grid-cols-[1fr_auto]">
+          <div className="p-5 sm:p-8"><p className="text-[11px] font-medium uppercase tracking-[.14em] text-zinc-500">image to tactile diagram</p><p className="mt-2 text-[26px] font-medium tracking-[-.055em] text-zinc-800 sm:text-[32px]">Panotact <span className="text-zinc-400">/ Tactile workspace</span></p></div>
+          <div className="flex border-t border-zinc-200 sm:border-l sm:border-t-0">
             <input ref={uploadRef} aria-label="이미지 또는 PDF 파일 선택" type="file" accept="image/png,image/jpeg,image/webp,application/pdf" className="pointer-events-none absolute h-px w-px opacity-0" onChange={(event) => handleFile(event.target.files?.[0])} />
             <input ref={batchUploadRef} aria-label="여러 PDF 파일 대기열 선택" type="file" accept="application/pdf,.pdf" multiple className="pointer-events-none absolute h-px w-px opacity-0" onChange={(event) => { void handlePdfBatch(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} />
-            <Button variant="ghost" className="archive-action-button flex-1 border-r border-[#111]" onClick={() => uploadRef.current?.click()} disabled={isLoading}>{isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}FILE</Button>
-            <Button variant="ghost" className="archive-action-button flex-1" onClick={() => batchUploadRef.current?.click()} disabled={isLoading}><Files className="mr-2 h-4 w-4" />PDFs</Button>
+            <Button variant="ghost" className="archive-action-button button-upload flex-1 border-r border-zinc-200" onClick={() => uploadRef.current?.click()} disabled={isLoading}>{isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}FILE</Button>
+            <Button variant="ghost" className="archive-action-button button-upload flex-1" onClick={() => batchUploadRef.current?.click()} disabled={isLoading}><Files className="mr-2 h-4 w-4" />PDFs</Button>
           </div>
         </section>
 

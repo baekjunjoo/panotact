@@ -1,13 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import {
   ArrowRight,
-  Eraser,
   Check,
-  ChevronLeft,
-  ChevronRight,
   CircleHelp,
   Download,
+  Eraser,
   FileImage,
   FilePlus2,
   FileText,
@@ -15,10 +13,12 @@ import {
   ImageUp,
   Layers3,
   Loader2,
-  Minus,
+  LocateFixed,
+  Maximize2,
   MousePointer2,
-  Plus,
+  RefreshCw,
   RotateCcw,
+  ScanSearch,
   Trash2,
   Upload,
   WandSparkles,
@@ -38,28 +38,67 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 
 const GRID_WIDTH = 60;
 const GRID_HEIGHT = 40;
+const GRID_RATIO = GRID_WIDTH / GRID_HEIGHT;
+const FULL_CROP = { x: 0, y: 0, width: 1, height: 1 };
 const EMPTY_GRID = () => Array.from({ length: GRID_HEIGHT }, () => Array(GRID_WIDTH).fill(false));
 
+type ConversionMode = "edges" | "filled";
+type PageKind = "overall" | "structure" | "focus" | "manual";
+type Crop = { x: number; y: number; width: number; height: number };
+type FocusCandidate = { id: string; label: string; crop: Crop; score: number };
+type SourceInput = { source: string; label: string };
+type SourceSet = SourceInput & {
+  id: string;
+  aspect: number;
+  candidates: FocusCandidate[];
+  selectedCrop: Crop;
+};
 type TactilePage = {
   id: string;
   title: string;
   altText: string;
   grid: boolean[][];
+  kind: PageKind;
   source?: string;
+  sourceKey?: string;
+  crop?: Crop;
 };
-
-type ConversionMode = "edges" | "filled";
-
-function cloneGrid(grid: boolean[][]) {
-  return grid.map((row) => [...row]);
-}
 
 function createId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function cloneGrid(grid: boolean[][]) {
+  return grid.map((row) => [...row]);
+}
+
 function dotCount(grid: boolean[][]) {
   return grid.flat().filter(Boolean).length;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
+function cropFromCenter(centerX: number, centerY: number, width: number, sourceAspect: number): Crop {
+  let cropWidth = clamp(width, 0.22, 0.92);
+  let cropHeight = (cropWidth * sourceAspect) / GRID_RATIO;
+
+  if (cropHeight > 0.9) {
+    cropHeight = 0.9;
+    cropWidth = (cropHeight * GRID_RATIO) / sourceAspect;
+  }
+
+  return {
+    x: clamp(centerX - cropWidth / 2, 0, 1 - cropWidth),
+    y: clamp(centerY - cropHeight / 2, 0, 1 - cropHeight),
+    width: cropWidth,
+    height: cropHeight,
+  };
+}
+
+function cropCenter(crop: Crop) {
+  return { x: crop.x + crop.width / 2, y: crop.y + crop.height / 2 };
 }
 
 function gridToBitmapHex(grid: boolean[][]) {
@@ -75,8 +114,8 @@ function gridToBitmapHex(grid: boolean[][]) {
     for (let x = 0; x < GRID_WIDTH; x += 2) {
       let bits = 0;
       for (let row = 0; row < 4; row += 1) {
-        for (let col = 0; col < 2; col += 1) {
-          if (grid[y + row][x + col]) bits |= 1 << bitPositions[row][col];
+        for (let column = 0; column < 2; column += 1) {
+          if (grid[y + row][x + column]) bits |= 1 << bitPositions[row][column];
         }
       }
       cells.push((0x2800 + bits).toString(16).padStart(4, "0"));
@@ -85,46 +124,153 @@ function gridToBitmapHex(grid: boolean[][]) {
   return cells.join("");
 }
 
-function getImageDataFromSource(source: string): Promise<ImageData> {
+function loadImage(source: string): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const image = new Image();
-    image.onload = () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = GRID_WIDTH;
-      canvas.height = GRID_HEIGHT;
-      const context = canvas.getContext("2d", { willReadFrequently: true });
-      if (!context) return reject(new Error("Canvas를 시작할 수 없습니다."));
-      context.drawImage(image, 0, 0, GRID_WIDTH, GRID_HEIGHT);
-      resolve(context.getImageData(0, 0, GRID_WIDTH, GRID_HEIGHT));
-    };
+    image.onload = () => resolve(image);
     image.onerror = () => reject(new Error("이미지를 불러올 수 없습니다."));
     image.src = source;
   });
 }
 
-function sourceToGrid(imageData: ImageData, threshold: number, mode: ConversionMode, invert: boolean) {
-  const grid = EMPTY_GRID();
-  const luminance = (x: number, y: number) => {
-    const safeX = Math.min(GRID_WIDTH - 1, Math.max(0, x));
-    const safeY = Math.min(GRID_HEIGHT - 1, Math.max(0, y));
-    const index = (safeY * GRID_WIDTH + safeX) * 4;
-    const data = imageData.data;
-    return 0.2126 * data[index] + 0.7152 * data[index + 1] + 0.0722 * data[index + 2];
+async function getImageDataFromSource(
+  source: string,
+  crop: Crop = FULL_CROP,
+  width = GRID_WIDTH,
+  height = GRID_HEIGHT,
+): Promise<ImageData> {
+  const image = await loadImage(source);
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("Canvas를 시작할 수 없습니다.");
+
+  context.fillStyle = "white";
+  context.fillRect(0, 0, width, height);
+  context.drawImage(
+    image,
+    image.naturalWidth * crop.x,
+    image.naturalHeight * crop.y,
+    image.naturalWidth * crop.width,
+    image.naturalHeight * crop.height,
+    0,
+    0,
+    width,
+    height,
+  );
+  return context.getImageData(0, 0, width, height);
+}
+
+async function inspectSource(source: string) {
+  const image = await loadImage(source);
+  const canvas = document.createElement("canvas");
+  canvas.width = 120;
+  canvas.height = 80;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("이미지를 분석할 수 없습니다.");
+  context.fillStyle = "white";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+  return {
+    aspect: image.naturalWidth / image.naturalHeight,
+    imageData: context.getImageData(0, 0, canvas.width, canvas.height),
   };
+}
+
+function pixel(imageData: ImageData, x: number, y: number) {
+  const safeX = clamp(x, 0, imageData.width - 1);
+  const safeY = clamp(y, 0, imageData.height - 1);
+  const offset = (safeY * imageData.width + safeX) * 4;
+  const { data } = imageData;
+  return [data[offset], data[offset + 1], data[offset + 2], data[offset + 3]] as const;
+}
+
+function luminance(color: readonly number[]) {
+  return 0.2126 * color[0] + 0.7152 * color[1] + 0.0722 * color[2];
+}
+
+function colorDistance(a: readonly number[], b: readonly number[]) {
+  return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+}
+
+function isForeground(color: readonly number[]) {
+  const high = Math.max(color[0], color[1], color[2]);
+  const low = Math.min(color[0], color[1], color[2]);
+  return color[3] > 25 && (luminance(color) < 242 || high - low > 26);
+}
+
+function foregroundMask(imageData: ImageData) {
+  const mask = EMPTY_GRID();
+  for (let y = 0; y < GRID_HEIGHT; y += 1) {
+    for (let x = 0; x < GRID_WIDTH; x += 1) mask[y][x] = isForeground(pixel(imageData, x, y));
+  }
+  return mask;
+}
+
+function largestComponent(mask: boolean[][]) {
+  const visited = EMPTY_GRID();
+  let best: Array<[number, number]> = [];
 
   for (let y = 0; y < GRID_HEIGHT; y += 1) {
     for (let x = 0; x < GRID_WIDTH; x += 1) {
-      const value = luminance(x, y);
-      const isRaised =
-        mode === "filled"
-          ? value < threshold
-          : Math.abs(luminance(x + 1, y) - luminance(x - 1, y)) +
-              Math.abs(luminance(x, y + 1) - luminance(x, y - 1)) >
-            threshold * 0.72;
-      grid[y][x] = invert ? !isRaised : isRaised;
+      if (!mask[y][x] || visited[y][x]) continue;
+      const component: Array<[number, number]> = [];
+      const queue: Array<[number, number]> = [[x, y]];
+      visited[y][x] = true;
+
+      while (queue.length) {
+        const [currentX, currentY] = queue.shift()!;
+        component.push([currentX, currentY]);
+        const neighbors = [
+          [currentX + 1, currentY],
+          [currentX - 1, currentY],
+          [currentX, currentY + 1],
+          [currentX, currentY - 1],
+        ];
+        neighbors.forEach(([nextX, nextY]) => {
+          if (
+            nextX >= 0 &&
+            nextY >= 0 &&
+            nextX < GRID_WIDTH &&
+            nextY < GRID_HEIGHT &&
+            mask[nextY][nextX] &&
+            !visited[nextY][nextX]
+          ) {
+            visited[nextY][nextX] = true;
+            queue.push([nextX, nextY]);
+          }
+        });
+      }
+
+      if (component.length > best.length) best = component;
     }
   }
-  return grid;
+
+  const result = EMPTY_GRID();
+  best.forEach(([x, y]) => {
+    result[y][x] = true;
+  });
+  return result;
+}
+
+function dilateGrid(grid: boolean[][], radius = 1) {
+  const result = EMPTY_GRID();
+  for (let y = 0; y < GRID_HEIGHT; y += 1) {
+    for (let x = 0; x < GRID_WIDTH; x += 1) {
+      if (!grid[y][x]) continue;
+      for (let offsetY = -radius; offsetY <= radius; offsetY += 1) {
+        for (let offsetX = -radius; offsetX <= radius; offsetX += 1) {
+          const targetX = x + offsetX;
+          const targetY = y + offsetY;
+          if (targetX >= 0 && targetY >= 0 && targetX < GRID_WIDTH && targetY < GRID_HEIGHT) {
+            result[targetY][targetX] = true;
+          }
+        }
+      }
+    }
+  }
+  return result;
 }
 
 function simplifyGrid(grid: boolean[][], passes: number) {
@@ -134,9 +280,9 @@ function simplifyGrid(grid: boolean[][], passes: number) {
     for (let y = 1; y < GRID_HEIGHT - 1; y += 1) {
       for (let x = 1; x < GRID_WIDTH - 1; x += 1) {
         let neighbors = 0;
-        for (let yy = -1; yy <= 1; yy += 1) {
-          for (let xx = -1; xx <= 1; xx += 1) {
-            if (xx !== 0 || yy !== 0) neighbors += Number(result[y + yy][x + xx]);
+        for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+          for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+            if (offsetX !== 0 || offsetY !== 0) neighbors += Number(result[y + offsetY][x + offsetX]);
           }
         }
         if (neighbors <= 1) next[y][x] = false;
@@ -148,13 +294,116 @@ function simplifyGrid(grid: boolean[][], passes: number) {
   return result;
 }
 
+function sourceToOverallGrid(imageData: ImageData) {
+  const subject = largestComponent(foregroundMask(imageData));
+  const outline = EMPTY_GRID();
+
+  for (let y = 0; y < GRID_HEIGHT; y += 1) {
+    for (let x = 0; x < GRID_WIDTH; x += 1) {
+      if (!subject[y][x]) continue;
+      const touchesBackground = [
+        [x + 1, y],
+        [x - 1, y],
+        [x, y + 1],
+        [x, y - 1],
+      ].some(([nextX, nextY]) => nextX < 0 || nextY < 0 || nextX >= GRID_WIDTH || nextY >= GRID_HEIGHT || !subject[nextY][nextX]);
+      if (touchesBackground) outline[y][x] = true;
+    }
+  }
+  return dilateGrid(outline, 1);
+}
+
+function sourceToStructureGrid(imageData: ImageData, threshold: number, filled: boolean, focus: boolean) {
+  const result = EMPTY_GRID();
+  const mask = foregroundMask(imageData);
+  const edgeLimit = 54 + threshold * (focus ? 0.26 : 0.34);
+
+  for (let y = 0; y < GRID_HEIGHT; y += 1) {
+    for (let x = 0; x < GRID_WIDTH; x += 1) {
+      const current = pixel(imageData, x, y);
+      if (filled) {
+        result[y][x] = mask[y][x] && luminance(current) < threshold;
+        continue;
+      }
+      const horizontal = colorDistance(pixel(imageData, x + 1, y), pixel(imageData, x - 1, y));
+      const vertical = colorDistance(pixel(imageData, x, y + 1), pixel(imageData, x, y - 1));
+      const isDarkLine = luminance(current) < 76;
+      result[y][x] = mask[y][x] && (horizontal + vertical > edgeLimit || isDarkLine);
+    }
+  }
+  return result;
+}
+
+function scoreCrop(imageData: ImageData, crop: Crop) {
+  const startX = Math.floor(crop.x * imageData.width);
+  const endX = Math.min(imageData.width - 1, Math.ceil((crop.x + crop.width) * imageData.width));
+  const startY = Math.floor(crop.y * imageData.height);
+  const endY = Math.min(imageData.height - 1, Math.ceil((crop.y + crop.height) * imageData.height));
+  let score = 0;
+
+  for (let y = startY + 1; y < endY - 1; y += 1) {
+    for (let x = startX + 1; x < endX - 1; x += 1) {
+      const current = pixel(imageData, x, y);
+      if (!isForeground(current)) continue;
+      score += colorDistance(pixel(imageData, x + 1, y), pixel(imageData, x - 1, y));
+      score += colorDistance(pixel(imageData, x, y + 1), pixel(imageData, x, y - 1));
+    }
+  }
+  return score;
+}
+
+function findFocusCandidates(imageData: ImageData, sourceAspect: number) {
+  const options: FocusCandidate[] = [];
+  const centers = [0.2, 0.35, 0.5, 0.65, 0.8];
+  centers.forEach((centerY) => {
+    centers.forEach((centerX) => {
+      const crop = cropFromCenter(centerX, centerY, 0.5, sourceAspect);
+      options.push({ id: createId(), label: "", crop, score: scoreCrop(imageData, crop) });
+    });
+  });
+
+  const selected: FocusCandidate[] = [];
+  options
+    .sort((a, b) => b.score - a.score)
+    .forEach((candidate) => {
+      const candidateCenter = cropCenter(candidate.crop);
+      const isDistantEnough = selected.every((current) => {
+        const currentCenter = cropCenter(current.crop);
+        return Math.hypot(candidateCenter.x - currentCenter.x, candidateCenter.y - currentCenter.y) > 0.24;
+      });
+      if (isDistantEnough && selected.length < 3) selected.push(candidate);
+    });
+
+  const fallbackCenters: Array<[number, number]> = [
+    [0.5, 0.5],
+    [0.3, 0.5],
+    [0.7, 0.5],
+  ];
+  fallbackCenters.forEach(([x, y]) => {
+    if (selected.length < 3) {
+      const crop = cropFromCenter(x, y, 0.5, sourceAspect);
+      selected.push({ id: createId(), label: "", crop, score: 0 });
+    }
+  });
+
+  return selected.map((candidate, index) => ({ ...candidate, label: `후보 ${String.fromCharCode(65 + index)}` }));
+}
+
 function createBlankPage(title = "새 촉각 페이지"): TactilePage {
-  return { id: createId(), title, altText: "", grid: EMPTY_GRID() };
+  return { id: createId(), title, altText: "", grid: EMPTY_GRID(), kind: "manual" };
+}
+
+function pageInfo(kind: PageKind) {
+  if (kind === "overall") return { title: "1. 전체 형태", description: "가장 큰 외곽 윤곽" };
+  if (kind === "structure") return { title: "2. 구조 구분", description: "내부 경계와 반복 구조" };
+  if (kind === "focus") return { title: "3. 핵심 부위 확대", description: "사용자가 고른 영역" };
+  return { title: "수동 페이지", description: "직접 만든 촉각 도식" };
 }
 
 export default function Home() {
   const [pages, setPages] = useState<TactilePage[]>([createBlankPage("촉각 도식 1")]);
   const [selectedId, setSelectedId] = useState<string>(() => pages[0].id);
+  const [sourceSets, setSourceSets] = useState<SourceSet[]>([]);
   const [fileTitle, setFileTitle] = useState("나의 촉각 도식");
   const [threshold, setThreshold] = useState(132);
   const [mode, setMode] = useState<ConversionMode>("edges");
@@ -163,7 +412,9 @@ export default function Home() {
   const [tool, setTool] = useState<"draw" | "erase">("draw");
   const [brushSize, setBrushSize] = useState(1);
   const [isLoading, setIsLoading] = useState(false);
-  const [status, setStatus] = useState("이미지 또는 PDF를 올려 시작하세요.");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [isFocusing, setIsFocusing] = useState(false);
+  const [status, setStatus] = useState("이미지 또는 PDF를 올리면 3개의 촉각 구조도 초안을 만듭니다.");
   const [isDrawing, setIsDrawing] = useState(false);
   const uploadRef = useRef<HTMLInputElement>(null);
 
@@ -171,26 +422,11 @@ export default function Home() {
     () => pages.find((page) => page.id === selectedId) ?? pages[0],
     [pages, selectedId],
   );
-
-  const sourceImage = activePage?.source;
-
-  useEffect(() => {
-    if (!sourceImage || !activePage) return;
-    let cancelled = false;
-    getImageDataFromSource(sourceImage)
-      .then((imageData) => {
-        if (cancelled) return;
-        const raw = sourceToGrid(imageData, threshold, mode, invert);
-        const grid = simplifyGrid(raw, simplification);
-        setPages((current) =>
-          current.map((page) => (page.id === activePage.id ? { ...page, grid } : page)),
-        );
-      })
-      .catch(() => setStatus("변환을 적용할 수 없습니다. 다른 파일을 시도해 주세요."));
-    return () => {
-      cancelled = true;
-    };
-  }, [sourceImage, threshold, mode, invert, simplification, activePage?.id]);
+  const activeSourceSet = useMemo(() => {
+    const sourceKey = activePage?.sourceKey;
+    return sourceSets.find((sourceSet) => sourceSet.id === sourceKey) ?? sourceSets[0];
+  }, [activePage?.sourceKey, sourceSets]);
+  const sourceImage = activePage?.source ?? activeSourceSet?.source;
 
   function updateActivePage(patch: Partial<TactilePage>) {
     if (!activePage) return;
@@ -201,9 +437,11 @@ export default function Home() {
     if (!activePage || x < 0 || y < 0 || x >= GRID_WIDTH || y >= GRID_HEIGHT) return;
     const radius = brushSize === 3 ? 1 : 0;
     const grid = cloneGrid(activePage.grid);
-    for (let yy = y - radius; yy <= y + radius; yy += 1) {
-      for (let xx = x - radius; xx <= x + radius; xx += 1) {
-        if (xx >= 0 && yy >= 0 && xx < GRID_WIDTH && yy < GRID_HEIGHT) grid[yy][xx] = tool === "draw";
+    for (let offsetY = y - radius; offsetY <= y + radius; offsetY += 1) {
+      for (let offsetX = x - radius; offsetX <= x + radius; offsetX += 1) {
+        if (offsetX >= 0 && offsetY >= 0 && offsetX < GRID_WIDTH && offsetY < GRID_HEIGHT) {
+          grid[offsetY][offsetX] = tool === "draw";
+        }
       }
     }
     updateActivePage({ grid });
@@ -230,25 +468,86 @@ export default function Home() {
     applyAt(x, y);
   }
 
-  async function makePageFromImage(source: string, title: string) {
-    const imageData = await getImageDataFromSource(source);
-    const raw = sourceToGrid(imageData, threshold, mode, invert);
-    const page: TactilePage = {
-      id: createId(),
-      title,
-      altText: "원본 그림을 단순화한 60×40 촉각 그래픽입니다.",
-      grid: simplifyGrid(raw, simplification),
-      source,
-    };
-    return page;
+  async function gridFor(source: string, crop: Crop, kind: PageKind) {
+    const imageData = await getImageDataFromSource(source, crop);
+    let raw: boolean[][];
+    if (kind === "overall") {
+      raw = sourceToOverallGrid(imageData);
+    } else {
+      raw = sourceToStructureGrid(imageData, threshold, mode === "filled", kind === "focus");
+    }
+    const passes = kind === "overall" ? Math.max(1, simplification) : simplification;
+    raw = simplifyGrid(raw, passes);
+    return invert ? raw.map((row) => row.map((value) => !value)) : raw;
   }
 
-  async function processPdf(file: File) {
+  async function makeAutoPage(sourceSet: SourceSet, kind: Exclude<PageKind, "manual">): Promise<TactilePage> {
+    const crop = kind === "focus" ? sourceSet.selectedCrop : FULL_CROP;
+    const grid = await gridFor(sourceSet.source, crop, kind);
+    const info = pageInfo(kind);
+    const altText =
+      kind === "overall"
+        ? "원본에서 가장 큰 형태의 외곽선을 추린 촉각 도식입니다."
+        : kind === "structure"
+          ? "원본의 경계와 색·명암 차이를 구조 구분용 촉각 선으로 바꾼 도식입니다."
+          : "사용자가 선택한 핵심 부위를 확대해 구조 경계를 표현한 촉각 도식입니다.";
+    return {
+      id: createId(),
+      title: sourceSets.length > 1 ? `${sourceSet.label} · ${info.title}` : info.title,
+      altText,
+      grid,
+      kind,
+      source: sourceSet.source,
+      sourceKey: sourceSet.id,
+      crop,
+    };
+  }
+
+  async function makeAutoPages(sets: SourceSet[]) {
+    return Promise.all(sets.flatMap((sourceSet) => [
+      makeAutoPage(sourceSet, "overall"),
+      makeAutoPage(sourceSet, "structure"),
+      makeAutoPage(sourceSet, "focus"),
+    ]));
+  }
+
+  async function refreshFocusPage(sourceSet: SourceSet) {
+    setIsFocusing(true);
+    try {
+      const grid = await gridFor(sourceSet.source, sourceSet.selectedCrop, "focus");
+      setPages((current) =>
+        current.map((page) =>
+          page.sourceKey === sourceSet.id && page.kind === "focus"
+            ? { ...page, grid, crop: sourceSet.selectedCrop }
+            : page,
+        ),
+      );
+      setStatus("핵심 부위 확대 페이지를 선택한 영역으로 갱신했습니다.");
+    } catch {
+      setStatus("핵심 부위 확대를 만들 수 없습니다. 다른 위치를 선택해 주세요.");
+    } finally {
+      setIsFocusing(false);
+    }
+  }
+
+  async function createSourceSet(input: SourceInput): Promise<SourceSet> {
+    const inspection = await inspectSource(input.source);
+    const candidates = findFocusCandidates(inspection.imageData, inspection.aspect);
+    return {
+      ...input,
+      id: createId(),
+      aspect: inspection.aspect,
+      candidates,
+      selectedCrop: candidates[0].crop,
+    };
+  }
+
+  async function processPdf(file: File): Promise<SourceInput[]> {
     const data = new Uint8Array(await file.arrayBuffer());
     const pdfDocument = await pdfjsLib.getDocument({ data }).promise;
-    const generated: TactilePage[] = [];
+    const sources: SourceInput[] = [];
     for (let pageNumber = 1; pageNumber <= pdfDocument.numPages; pageNumber += 1) {
-      setStatus(`PDF ${pageNumber}/${pdfDocument.numPages} 페이지를 촉각 격자로 변환 중…`);
+      setStatus(`PDF ${pageNumber}/${pdfDocument.numPages} 페이지를 분석 중…`);
       const pdfPage = await pdfDocument.getPage(pageNumber);
       const viewport = pdfPage.getViewport({ scale: 1.5 });
       const canvas = document.createElement("canvas");
@@ -257,19 +556,21 @@ export default function Home() {
       const context = canvas.getContext("2d", { alpha: false });
       if (!context) throw new Error("PDF 캔버스를 만들 수 없습니다.");
       await pdfPage.render({ canvas, canvasContext: context, viewport }).promise;
-      const source = canvas.toDataURL("image/png");
-      generated.push(await makePageFromImage(source, `${file.name.replace(/\.pdf$/i, "")} · ${pageNumber}쪽`));
+      sources.push({
+        source: canvas.toDataURL("image/png"),
+        label: `${file.name.replace(/\.pdf$/i, "")} · ${pageNumber}쪽`,
+      });
     }
-    return generated;
+    return sources;
   }
 
   async function handleFile(file?: File) {
     if (!file) return;
     setIsLoading(true);
     try {
-      let generated: TactilePage[] = [];
+      let sources: SourceInput[] = [];
       if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
-        generated = await processPdf(file);
+        sources = await processPdf(file);
       } else if (file.type.startsWith("image/")) {
         const source = await new Promise<string>((resolve, reject) => {
           const reader = new FileReader();
@@ -277,19 +578,63 @@ export default function Home() {
           reader.onerror = () => reject(new Error("이미지를 읽을 수 없습니다."));
           reader.readAsDataURL(file);
         });
-        generated = [await makePageFromImage(source, file.name.replace(/\.[^.]+$/, ""))];
+        sources = [{ source, label: file.name.replace(/\.[^.]+$/, "") }];
       } else {
         throw new Error("PNG, JPG, WebP 또는 PDF 파일만 지원합니다.");
       }
+
+      setStatus("전체 형태·구조 구분·핵심 부위 확대 초안을 만들고 있습니다…");
+      const sets = await Promise.all(sources.map(createSourceSet));
+      const generated = await makeAutoPages(sets);
+      setSourceSets(sets);
       setPages(generated);
       setSelectedId(generated[0].id);
       setFileTitle(file.name.replace(/\.[^.]+$/, ""));
-      setStatus(`${generated.length}개 촉각 페이지가 준비되었습니다. 라벨·잔선을 지우개로 정리해 주세요.`);
+      setStatus(`${sources.length}개 원본에서 ${generated.length}개 촉각 구조도 초안을 만들었습니다. 핵심 부위를 클릭해 3번째 페이지를 바꿔 보세요.`);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "파일을 처리하지 못했습니다.");
     } finally {
       setIsLoading(false);
     }
+  }
+
+  async function regenerateAllPages() {
+    if (!sourceSets.length) {
+      setStatus("먼저 이미지 또는 PDF를 올려 주세요.");
+      return;
+    }
+    setIsGenerating(true);
+    try {
+      const currentSourceKey = activePage?.sourceKey;
+      const currentKind = activePage?.kind;
+      const generated = await makeAutoPages(sourceSets);
+      setPages(generated);
+      const replacement = generated.find((page) => page.sourceKey === currentSourceKey && page.kind === currentKind) ?? generated[0];
+      setSelectedId(replacement.id);
+      setStatus("현재 변환 설정으로 3페이지 촉각 구조도 초안을 다시 만들었습니다.");
+    } catch {
+      setStatus("자동 초안을 다시 만들 수 없습니다. 파일을 다시 올려 주세요.");
+    } finally {
+      setIsGenerating(false);
+    }
+  }
+
+  function selectFocusCrop(crop: Crop) {
+    if (!activeSourceSet) return;
+    const updatedSet = { ...activeSourceSet, selectedCrop: crop };
+    setSourceSets((current) => current.map((item) => (item.id === updatedSet.id ? updatedSet : item)));
+    void refreshFocusPage(updatedSet);
+  }
+
+  function selectFocusAt(centerX: number, centerY: number) {
+    if (!activeSourceSet) return;
+    selectFocusCrop(cropFromCenter(centerX, centerY, activeSourceSet.selectedCrop.width, activeSourceSet.aspect));
+  }
+
+  function changeFocusScale(width: number) {
+    if (!activeSourceSet) return;
+    const center = cropCenter(activeSourceSet.selectedCrop);
+    selectFocusCrop(cropFromCenter(center.x, center.y, width, activeSourceSet.aspect));
   }
 
   function downloadDtms() {
@@ -315,12 +660,12 @@ export default function Home() {
 
   function resetActiveGrid() {
     if (!activePage) return;
-    updateActivePage({ grid: EMPTY_GRID(), source: undefined });
-    setStatus("현재 페이지를 빈 60×40 격자로 초기화했습니다.");
+    updateActivePage({ grid: EMPTY_GRID() });
+    setStatus("현재 페이지의 점을 모두 지웠습니다. 원본과 페이지 설정은 유지됩니다.");
   }
 
   function addBlankPage() {
-    const page = createBlankPage(`촉각 도식 ${pages.length + 1}`);
+    const page = createBlankPage(`수동 촉각 도식 ${pages.length + 1}`);
     setPages((current) => [...current, page]);
     setSelectedId(page.id);
   }
@@ -357,8 +702,7 @@ export default function Home() {
             </div>
           </div>
           <div className="hidden items-center gap-2 text-xs text-slate-500 md:flex">
-            <span className="h-2 w-2 rounded-full bg-emerald-500" />
-            브라우저 안에서만 처리됩니다
+            <span className="h-2 w-2 rounded-full bg-emerald-500" /> 브라우저 안에서만 처리됩니다
           </div>
           <Button className="rounded-xl bg-[#17352b] px-4 text-white hover:bg-[#244b3d]" onClick={downloadDtms}>
             <Download className="mr-2 h-4 w-4" /> DTMS 저장
@@ -370,57 +714,103 @@ export default function Home() {
         <section className="mb-7 flex flex-col justify-between gap-4 rounded-[24px] border border-[#d9e3df] bg-[radial-gradient(circle_at_75%_20%,#f8eac8_0%,transparent_25%),linear-gradient(130deg,#e9f2ee_0%,#fdfcf8_58%,#f6f3ed_100%)] px-6 py-6 shadow-sm lg:flex-row lg:items-end lg:px-8">
           <div className="max-w-2xl">
             <p className="mb-2 text-xs font-bold tracking-[0.16em] text-[#557469]">촉각 교육용 구조도 만들기</p>
-            <h1 className="font-display text-3xl tracking-tight text-[#17352b] sm:text-4xl">이미지를 점으로 바꾸고,<br className="hidden sm:block" /> 손끝으로 읽히게 다듬으세요.</h1>
-            <p className="mt-3 max-w-xl text-sm leading-6 text-slate-600">PDF와 이미지를 60×40 촉각 격자로 변환합니다. 라벨·지시선·미세한 잡음은 지우개와 점 편집으로 정리한 뒤 Dot Pad용 DTMS로 저장하세요.</p>
+            <h1 className="font-display text-3xl tracking-tight text-[#17352b] sm:text-4xl">한 장의 이미지에서<br className="hidden sm:block" /> 세 단계 촉각 구조도를 만드세요.</h1>
+            <p className="mt-3 max-w-xl text-sm leading-6 text-slate-600">업로드 즉시 전체 형태·구조 구분·핵심 부위 확대 초안을 만들고, 원본에서 직접 핵심 위치를 선택해 세 번째 페이지를 바꾼 뒤 Dot Pad용 DTMS로 저장합니다.</p>
           </div>
           <div className="flex flex-wrap gap-2 text-xs font-medium text-[#315c4d]">
             <span className="rounded-full border border-[#bdd4c9] bg-white/70 px-3 py-1.5">무료 · 계정 불필요</span>
-            <span className="rounded-full border border-[#bdd4c9] bg-white/70 px-3 py-1.5">이미지·PDF 지원</span>
-            <span className="rounded-full border border-[#bdd4c9] bg-white/70 px-3 py-1.5">다중 페이지 DTMS</span>
+            <span className="rounded-full border border-[#bdd4c9] bg-white/70 px-3 py-1.5">3페이지 자동 초안</span>
+            <span className="rounded-full border border-[#bdd4c9] bg-white/70 px-3 py-1.5">클릭하여 핵심 부위 선택</span>
           </div>
         </section>
+
+        {activeSourceSet ? (
+          <section className="mb-7 overflow-hidden rounded-[24px] border border-[#cadcd4] bg-white shadow-sm">
+            <div className="flex flex-col justify-between gap-3 border-b border-[#e3ece7] bg-[#f5f9f6] px-5 py-4 sm:flex-row sm:items-center sm:px-6">
+              <div className="flex items-center gap-3">
+                <div className="grid h-9 w-9 place-items-center rounded-xl bg-[#17352b] text-[#f4ca68]"><LocateFixed className="h-4.5 w-4.5" /></div>
+                <div>
+                  <h2 className="text-sm font-bold text-[#17352b]">핵심 부위 선택</h2>
+                  <p className="text-xs text-slate-500">원본을 클릭하면 확대 범위가 이동하고, 3번째 촉각 페이지가 자동으로 갱신됩니다.</p>
+                </div>
+              </div>
+              <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-[#315c4d] shadow-sm">{activeSourceSet.label}</span>
+            </div>
+            <div className="grid gap-5 p-5 lg:grid-cols-[minmax(0,1fr)_310px] lg:p-6">
+              <FocusPicker source={activeSourceSet.source} crop={activeSourceSet.selectedCrop} onSelectCenter={selectFocusAt} />
+              <div className="flex flex-col">
+                <p className="text-xs font-bold tracking-[0.1em] text-[#507366]">자동 탐색 후보</p>
+                <p className="mt-1 text-xs leading-5 text-slate-500">경계와 색 변화가 밀집된 곳을 후보로 찾았습니다. 교육에 중요한 부분이 다르면 원본을 직접 클릭해 옮기세요.</p>
+                <div className="mt-3 grid grid-cols-3 gap-2">
+                  {activeSourceSet.candidates.map((candidate) => {
+                    const chosen = Math.abs(candidate.crop.x - activeSourceSet.selectedCrop.x) < 0.01 && Math.abs(candidate.crop.y - activeSourceSet.selectedCrop.y) < 0.01;
+                    return (
+                      <button key={candidate.id} onClick={() => selectFocusCrop(candidate.crop)} className={cn("rounded-xl border px-2 py-2 text-left text-xs font-bold transition", chosen ? "border-[#2e7759] bg-[#e7f2ec] text-[#17352b] shadow-sm" : "border-slate-200 bg-white text-slate-600 hover:border-[#9ab9ab]")}>{candidate.label}</button>
+                    );
+                  })}
+                </div>
+                <div className="mt-5 border-t border-slate-100 pt-4">
+                  <div className="flex items-center justify-between"><p className="text-xs font-bold text-slate-700">확대 범위</p><span className="text-[11px] text-slate-500">60×40 비율 고정</span></div>
+                  <div className="mt-2 grid grid-cols-3 gap-2">
+                    {[
+                      ["좁게", 0.34],
+                      ["보통", 0.5],
+                      ["넓게", 0.68],
+                    ].map(([label, width]) => (
+                      <button key={String(label)} onClick={() => changeFocusScale(Number(width))} className={cn("rounded-lg px-2 py-2 text-xs font-bold transition", Math.abs(activeSourceSet.selectedCrop.width - Number(width)) < 0.08 ? "bg-[#17352b] text-white" : "bg-slate-100 text-slate-600 hover:bg-[#e7f2ec]")}>{label}</button>
+                    ))}
+                  </div>
+                </div>
+                <div className="mt-auto rounded-xl bg-[#17352b] px-3 py-3 text-xs leading-5 text-white/80">
+                  <Maximize2 className="mr-1.5 inline h-3.5 w-3.5 text-[#f4ca68]" />
+                  {isFocusing ? "선택한 부위를 60×40 촉각 격자로 바꾸는 중…" : "선택한 범위는 ‘3. 핵심 부위 확대’ 페이지에 반영됩니다."}
+                </div>
+              </div>
+            </div>
+          </section>
+        ) : (
+          <section className="mb-7 grid gap-3 rounded-[24px] border border-dashed border-[#adc8ba] bg-[#eff6f2] p-5 sm:grid-cols-3 sm:p-6">
+            {[
+              ["1", "전체 형태", "가장 큰 외곽 형태를 우선 추립니다."],
+              ["2", "구조 구분", "경계·반복 구조를 촉각선으로 바꿉니다."],
+              ["3", "핵심 부위 확대", "원본에서 직접 위치를 골라 확대합니다."],
+            ].map(([number, title, description]) => (
+              <div key={number} className="flex gap-3 rounded-xl bg-white/70 p-3"><span className="font-display text-2xl leading-6 text-[#c28d25]">{number}</span><div><p className="text-xs font-bold text-[#17352b]">{title}</p><p className="mt-1 text-[11px] leading-4 text-slate-500">{description}</p></div></div>
+            ))}
+          </section>
+        )}
 
         <div className="grid gap-6 xl:grid-cols-[280px_minmax(0,1fr)_320px]">
           <aside className="order-2 rounded-[22px] border border-slate-200 bg-white p-4 shadow-sm xl:order-1">
             <div className="mb-4 flex items-center justify-between">
               <div>
-                <p className="text-sm font-bold text-slate-800">페이지</p>
-                <p className="text-xs text-slate-500">DTMS에 순서대로 저장됩니다</p>
+                <p className="text-sm font-bold text-slate-800">DTMS 페이지</p>
+                <p className="text-xs text-slate-500">자동 초안과 수동 도식을 함께 저장</p>
               </div>
               <span className="grid h-7 min-w-7 place-items-center rounded-full bg-[#edf4f0] px-2 text-xs font-bold text-[#315c4d]">{pages.length}</span>
             </div>
             <div className="space-y-2">
-              {pages.map((page, index) => (
-                <button
-                  key={page.id}
-                  className={cn(
-                    "group flex w-full items-center gap-3 rounded-xl p-2 text-left transition",
-                    page.id === selectedId ? "bg-[#e8f1ed] ring-1 ring-[#b3cebf]" : "hover:bg-slate-50",
-                  )}
-                  onClick={() => setSelectedId(page.id)}
-                >
-                  <div className="grid h-11 w-14 shrink-0 place-items-center rounded-lg border border-slate-200 bg-[#fcfcfa]">
-                    <MiniGrid grid={page.grid} />
-                  </div>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-xs font-bold text-slate-700">{page.title || `페이지 ${index + 1}`}</span>
-                    <span className="mt-1 block text-[11px] text-slate-500">{dotCount(page.grid)} / 2400 점</span>
-                  </span>
-                  {page.id === selectedId && <Check className="h-4 w-4 text-[#2d7a58]" />}
-                </button>
-              ))}
+              {pages.map((page, index) => {
+                const info = pageInfo(page.kind);
+                return (
+                  <button key={page.id} className={cn("group flex w-full items-center gap-3 rounded-xl p-2 text-left transition", page.id === selectedId ? "bg-[#e8f1ed] ring-1 ring-[#b3cebf]" : "hover:bg-slate-50")} onClick={() => setSelectedId(page.id)}>
+                    <div className="grid h-11 w-14 shrink-0 place-items-center rounded-lg border border-slate-200 bg-[#fcfcfa]"><MiniGrid grid={page.grid} /></div>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-xs font-bold text-slate-700">{page.title || `페이지 ${index + 1}`}</span>
+                      <span className="mt-1 flex items-center gap-1 text-[10px] text-slate-500"><span className="rounded bg-white px-1 text-[#507366]">{info.description}</span><span>{dotCount(page.grid)}점</span></span>
+                    </span>
+                    {page.id === selectedId && <Check className="h-4 w-4 shrink-0 text-[#2d7a58]" />}
+                  </button>
+                );
+              })}
             </div>
             <div className="mt-4 grid grid-cols-2 gap-2">
-              <Button variant="outline" className="rounded-xl border-slate-200 text-xs" onClick={addBlankPage}>
-                <FilePlus2 className="mr-1.5 h-3.5 w-3.5" /> 빈 페이지
-              </Button>
-              <Button variant="outline" className="rounded-xl border-slate-200 text-xs" onClick={duplicatePage}>
-                <Layers3 className="mr-1.5 h-3.5 w-3.5" /> 복제
-              </Button>
+              <Button variant="outline" className="rounded-xl border-slate-200 text-xs" onClick={addBlankPage}><FilePlus2 className="mr-1.5 h-3.5 w-3.5" /> 빈 페이지</Button>
+              <Button variant="outline" className="rounded-xl border-slate-200 text-xs" onClick={duplicatePage}><Layers3 className="mr-1.5 h-3.5 w-3.5" /> 복제</Button>
             </div>
             <div className="mt-6 rounded-xl bg-[#f6f7f5] p-3">
               <p className="mb-1 text-xs font-bold text-[#315c4d]">촉각 설계 팁</p>
-              <p className="text-[11px] leading-5 text-slate-600">한 페이지에는 외곽·핵심 경계·주요 구조처럼 3~5개 정보만 남기면 더 읽기 쉽습니다.</p>
+              <p className="text-[11px] leading-5 text-slate-600">자동 결과는 초안입니다. 라벨·긴 지시선·미세한 잔선은 지우개로 빼고, 중요한 구조 사이에는 빈 공간을 남기세요.</p>
             </div>
           </aside>
 
@@ -429,64 +819,30 @@ export default function Home() {
               <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <p className="text-sm font-bold text-slate-800">60 × 40 촉각 편집기</p>
-                  <p className="text-xs text-slate-500">클릭하거나 드래그해서 점을 추가·제거합니다.</p>
+                  <p className="text-xs text-slate-500">{pageInfo(activePage?.kind ?? "manual").title} · 클릭하거나 드래그해서 점을 추가·제거합니다.</p>
                 </div>
                 <div className="flex rounded-xl bg-slate-100 p-1">
-                  <Button size="sm" variant="ghost" className={cn("h-8 rounded-lg px-3 text-xs", tool === "draw" && "bg-white shadow-sm")} onClick={() => setTool("draw")}>
-                    <MousePointer2 className="mr-1.5 h-3.5 w-3.5" /> 점 찍기
-                  </Button>
-                  <Button size="sm" variant="ghost" className={cn("h-8 rounded-lg px-3 text-xs", tool === "erase" && "bg-white shadow-sm")} onClick={() => setTool("erase")}>
-                    <Eraser className="mr-1.5 h-3.5 w-3.5" /> 지우기
-                  </Button>
+                  <Button size="sm" variant="ghost" className={cn("h-8 rounded-lg px-3 text-xs", tool === "draw" && "bg-white shadow-sm")} onClick={() => setTool("draw")}><MousePointer2 className="mr-1.5 h-3.5 w-3.5" /> 점 찍기</Button>
+                  <Button size="sm" variant="ghost" className={cn("h-8 rounded-lg px-3 text-xs", tool === "erase" && "bg-white shadow-sm")} onClick={() => setTool("erase")}><Eraser className="mr-1.5 h-3.5 w-3.5" /> 지우기</Button>
                 </div>
               </div>
 
               <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_220px]">
                 <div className="relative overflow-hidden rounded-2xl border border-[#d5e1db] bg-[radial-gradient(circle_at_1px_1px,rgba(23,53,43,.07)_1px,transparent_0)] [background-size:16px_16px] p-3 sm:p-5">
-                  <div
-                    role="application"
-                    aria-label="60 곱하기 40 촉각 점자 격자. 클릭하여 점을 편집합니다."
-                    className="tactile-grid mx-auto aspect-[3/2] w-full max-w-[720px] touch-none select-none rounded-lg bg-[#fbfdfb] p-[2.3%] shadow-inner"
-                    onPointerDown={handleGridPointerDown}
-                    onPointerMove={handleGridPointerMove}
-                    onPointerUp={() => setIsDrawing(false)}
-                    onPointerLeave={() => setIsDrawing(false)}
-                  >
-                    {activePage?.grid.map((row, y) =>
-                      row.map((raised, x) => (
-                        <span key={`${x}-${y}`} className={cn("dot", raised && "dot-raised")} />
-                      )),
-                    )}
+                  <div role="application" aria-label="60 곱하기 40 촉각 점자 격자. 클릭하여 점을 편집합니다." className="tactile-grid mx-auto aspect-[3/2] w-full max-w-[720px] touch-none select-none rounded-lg bg-[#fbfdfb] p-[2.3%] shadow-inner" onPointerDown={handleGridPointerDown} onPointerMove={handleGridPointerMove} onPointerUp={() => setIsDrawing(false)} onPointerLeave={() => setIsDrawing(false)} onPointerCancel={() => setIsDrawing(false)}>
+                    {activePage?.grid.map((row, y) => row.map((raised, x) => <span key={`${x}-${y}`} className={cn("dot", raised && "dot-raised")} />))}
                   </div>
-                  <div className="mt-3 flex items-center justify-between text-[11px] font-medium text-slate-500">
-                    <span>가로 60점</span>
-                    <span className="rounded-full bg-white px-2 py-1 shadow-sm">{activePage ? dotCount(activePage.grid) : 0} raised dots</span>
-                    <span>세로 40점</span>
-                  </div>
+                  <div className="mt-3 flex items-center justify-between text-[11px] font-medium text-slate-500"><span>가로 60점</span><span className="rounded-full bg-white px-2 py-1 shadow-sm">{activePage ? dotCount(activePage.grid) : 0} raised dots</span><span>세로 40점</span></div>
                 </div>
                 <div className="space-y-3">
                   <div className="rounded-2xl border border-slate-200 bg-[#fbfcfb] p-3">
-                    <p className="mb-2 text-xs font-bold text-slate-700">원본 보기</p>
-                    {sourceImage ? (
-                      <img className="aspect-[3/2] w-full rounded-lg border border-slate-200 object-contain bg-white" src={sourceImage} alt="업로드한 원본" />
-                    ) : (
-                      <div className="grid aspect-[3/2] place-items-center rounded-lg border border-dashed border-slate-300 bg-white px-3 text-center text-[11px] leading-4 text-slate-400">
-                        업로드하면 원본이 이곳에 표시됩니다
-                      </div>
-                    )}
+                    <p className="mb-2 text-xs font-bold text-slate-700">현재 원본</p>
+                    {sourceImage ? <img className="aspect-[3/2] w-full rounded-lg border border-slate-200 bg-white object-contain" src={sourceImage} alt="업로드한 원본" /> : <div className="grid aspect-[3/2] place-items-center rounded-lg border border-dashed border-slate-300 bg-white px-3 text-center text-[11px] leading-4 text-slate-400">업로드하면 원본이 이곳에 표시됩니다</div>}
                   </div>
                   <div className="rounded-2xl bg-[#17352b] p-3 text-white">
                     <p className="text-xs font-bold">편집 브러시</p>
-                    <div className="mt-3 flex gap-2">
-                      {[1, 3].map((size) => (
-                        <button key={size} onClick={() => setBrushSize(size)} className={cn("grid h-8 flex-1 place-items-center rounded-lg text-xs font-bold transition", brushSize === size ? "bg-[#f4ca68] text-[#17352b]" : "bg-white/10 text-white/80 hover:bg-white/20")}>
-                          {size === 1 ? "1점" : "3×3"}
-                        </button>
-                      ))}
-                    </div>
-                    <Button variant="ghost" className="mt-3 h-8 w-full rounded-lg text-xs text-white hover:bg-white/10 hover:text-white" onClick={resetActiveGrid}>
-                      <RotateCcw className="mr-1.5 h-3.5 w-3.5" /> 이 페이지 비우기
-                    </Button>
+                    <div className="mt-3 flex gap-2">{[1, 3].map((size) => <button key={size} onClick={() => setBrushSize(size)} className={cn("grid h-8 flex-1 place-items-center rounded-lg text-xs font-bold transition", brushSize === size ? "bg-[#f4ca68] text-[#17352b]" : "bg-white/10 text-white/80 hover:bg-white/20")}>{size === 1 ? "1점" : "3×3"}</button>)}</div>
+                    <Button variant="ghost" className="mt-3 h-8 w-full rounded-lg text-xs text-white hover:bg-white/10 hover:text-white" onClick={resetActiveGrid}><RotateCcw className="mr-1.5 h-3.5 w-3.5" /> 이 페이지 비우기</Button>
                   </div>
                 </div>
               </div>
@@ -498,56 +854,45 @@ export default function Home() {
                 <Label htmlFor="page-title" className="text-xs font-semibold text-slate-600">페이지 제목</Label>
                 <Input id="page-title" className="mt-1.5 rounded-xl border-slate-200" value={activePage?.title ?? ""} onChange={(event) => updateActivePage({ title: event.target.value })} />
                 <Label htmlFor="alt-text" className="mt-4 block text-xs font-semibold text-slate-600">대체 설명</Label>
-                <Textarea id="alt-text" className="mt-1.5 min-h-24 rounded-xl border-slate-200 text-sm" placeholder="예: 단면 외곽, 상단의 반복 블록, 내부의 굵은 연결 구조를 표현한 촉각 도식" value={activePage?.altText ?? ""} onChange={(event) => updateActivePage({ altText: event.target.value })} />
+                <Textarea id="alt-text" className="mt-1.5 min-h-24 rounded-xl border-slate-200 text-sm" placeholder="이 촉각 도식에 표시한 구조와 위치 관계를 간략히 설명하세요." value={activePage?.altText ?? ""} onChange={(event) => updateActivePage({ altText: event.target.value })} />
               </div>
               <div className="rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm">
                 <div className="mb-3 flex items-center gap-2"><CircleHelp className="h-4 w-4 text-[#507366]" /><p className="text-sm font-bold text-slate-800">내보내기 전 확인</p></div>
                 <ul className="space-y-2.5 text-xs leading-5 text-slate-600">
+                  <li className="flex gap-2"><Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />전체 → 구조 → 확대 순서가 학습 목적에 맞는지</li>
                   <li className="flex gap-2"><Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />텍스트·긴 지시선과 미세 잡음을 지웠는지</li>
-                  <li className="flex gap-2"><Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />중요한 구조 간에 충분한 빈 공간이 있는지</li>
                   <li className="flex gap-2"><Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />Dot Canvas에서는 ‘추가’가 아닌 ‘열기’를 사용할지</li>
                 </ul>
-                <div className="mt-4 flex gap-2">
-                  <Button variant="outline" className="flex-1 rounded-xl border-slate-200 text-xs" onClick={deleteActivePage}><Trash2 className="mr-1.5 h-3.5 w-3.5" /> 삭제</Button>
-                  <Button className="flex-1 rounded-xl bg-[#e0a93a] text-[#17352b] hover:bg-[#f1bd51]" onClick={downloadDtms}><Download className="mr-1.5 h-3.5 w-3.5" /> 저장</Button>
-                </div>
+                <div className="mt-4 flex gap-2"><Button variant="outline" className="flex-1 rounded-xl border-slate-200 text-xs" onClick={deleteActivePage}><Trash2 className="mr-1.5 h-3.5 w-3.5" /> 삭제</Button><Button className="flex-1 rounded-xl bg-[#e0a93a] text-[#17352b] hover:bg-[#f1bd51]" onClick={downloadDtms}><Download className="mr-1.5 h-3.5 w-3.5" /> 저장</Button></div>
               </div>
             </div>
           </section>
 
           <aside className="order-3 space-y-5">
             <section className="rounded-[22px] border border-slate-200 bg-white p-5 shadow-sm">
-              <div className="mb-4 flex items-center gap-2"><WandSparkles className="h-4 w-4 text-[#b57d16]" /><h2 className="text-sm font-bold text-slate-800">자동 단순화</h2></div>
-              <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1">
-                <button className={cn("rounded-lg px-3 py-2 text-xs font-bold transition", mode === "edges" && "bg-white text-[#17352b] shadow-sm")} onClick={() => setMode("edges")}>윤곽 우선</button>
-                <button className={cn("rounded-lg px-3 py-2 text-xs font-bold transition", mode === "filled" && "bg-white text-[#17352b] shadow-sm")} onClick={() => setMode("filled")}>면적 우선</button>
-              </div>
-              <SettingSlider label="감도" value={threshold} min={60} max={220} onChange={setThreshold} description={mode === "edges" ? "선과 경계를 더 많이 찾습니다" : "어두운 영역을 점으로 채웁니다"} />
+              <div className="mb-4 flex items-center gap-2"><WandSparkles className="h-4 w-4 text-[#b57d16]" /><h2 className="text-sm font-bold text-slate-800">자동 초안 설정</h2></div>
+              <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1"><button className={cn("rounded-lg px-3 py-2 text-xs font-bold transition", mode === "edges" && "bg-white text-[#17352b] shadow-sm")} onClick={() => setMode("edges")}>윤곽 우선</button><button className={cn("rounded-lg px-3 py-2 text-xs font-bold transition", mode === "filled" && "bg-white text-[#17352b] shadow-sm")} onClick={() => setMode("filled")}>면적 우선</button></div>
+              <SettingSlider label="감도" value={threshold} min={60} max={220} onChange={setThreshold} description={mode === "edges" ? "경계·색 변화 감지 수준" : "어두운 영역을 채우는 수준"} />
               <SettingSlider label="잡음 정리" value={simplification} min={0} max={3} onChange={setSimplification} description="작은 점 군집과 빈틈을 정리합니다" />
-              <div className="mt-5 flex items-center justify-between border-t border-slate-100 pt-4">
-                <div><p className="text-xs font-bold text-slate-700">흑백 반전</p><p className="mt-0.5 text-[11px] text-slate-500">밝은 형태를 점으로 변환</p></div>
-                <Switch checked={invert} onCheckedChange={setInvert} />
-              </div>
+              <div className="mt-5 flex items-center justify-between border-t border-slate-100 pt-4"><div><p className="text-xs font-bold text-slate-700">흑백 반전</p><p className="mt-0.5 text-[11px] text-slate-500">밝은 형태를 점으로 변환</p></div><Switch checked={invert} onCheckedChange={setInvert} /></div>
+              <Button className="mt-5 w-full rounded-xl bg-[#e6b346] text-xs font-bold text-[#17352b] hover:bg-[#f3c85f]" onClick={regenerateAllPages} disabled={!sourceSets.length || isGenerating}>{isGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}{isGenerating ? "3페이지 생성 중" : "3페이지 다시 생성"}</Button>
             </section>
 
             <section className="rounded-[22px] border border-dashed border-[#a9c8bb] bg-[#eff6f2] p-5">
               <input ref={uploadRef} aria-label="이미지 또는 PDF 파일 선택" type="file" accept="image/png,image/jpeg,image/webp,application/pdf" className="pointer-events-none absolute h-px w-px opacity-0" onChange={(event) => handleFile(event.target.files?.[0])} />
               <div className="grid h-10 w-10 place-items-center rounded-xl bg-white text-[#2d7056] shadow-sm"><ImageUp className="h-5 w-5" /></div>
-              <h2 className="mt-3 text-sm font-bold text-[#17352b]">새 이미지 불러오기</h2>
-              <p className="mt-1 text-xs leading-5 text-[#527267]">PNG, JPG, WebP 또는 PDF 전체 페이지를 처리합니다.</p>
-              <Button className="mt-4 w-full rounded-xl bg-[#17352b] text-white hover:bg-[#244b3d]" onClick={() => uploadRef.current?.click()} disabled={isLoading}>
-                {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}
-                파일 선택
-              </Button>
+              <h2 className="mt-3 text-sm font-bold text-[#17352b]">원본 불러오기</h2>
+              <p className="mt-1 text-xs leading-5 text-[#527267]">PNG, JPG, WebP 또는 PDF 전체 페이지에서 3단계 촉각 구조도를 만듭니다.</p>
+              <Button className="mt-4 w-full rounded-xl bg-[#17352b] text-white hover:bg-[#244b3d]" onClick={() => uploadRef.current?.click()} disabled={isLoading}>{isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}{isLoading ? "분석 중…" : "파일 선택"}</Button>
               <p aria-live="polite" className="mt-3 text-[11px] leading-4 text-[#527267]">{status}</p>
             </section>
 
             <section className="rounded-[22px] bg-[#17352b] p-5 text-white shadow-[0_14px_28px_rgba(23,53,43,.16)]">
-              <p className="text-xs font-bold tracking-[0.12em] text-[#f4ca68]">작동 방식</p>
+              <p className="text-xs font-bold tracking-[0.12em] text-[#f4ca68]">자동화 범위</p>
               <ol className="mt-3 space-y-3 text-xs leading-5 text-white/80">
-                <li className="flex gap-2"><span className="font-display text-lg leading-5 text-[#f4ca68]">1</span><span>그림 또는 PDF를 올려 60×40 격자로 축소합니다.</span></li>
-                <li className="flex gap-2"><span className="font-display text-lg leading-5 text-[#f4ca68]">2</span><span>자동 변환 후 라벨·지시선·불필요한 점을 직접 지웁니다.</span></li>
-                <li className="flex gap-2"><span className="font-display text-lg leading-5 text-[#f4ca68]">3</span><span>여러 페이지를 하나의 DTMS로 저장합니다.</span></li>
+                <li className="flex gap-2"><span className="font-display text-lg leading-5 text-[#f4ca68]">1</span><span>전체 형태는 가장 큰 전경 영역의 외곽선을 추립니다.</span></li>
+                <li className="flex gap-2"><span className="font-display text-lg leading-5 text-[#f4ca68]">2</span><span>구조 구분은 색·명암·윤곽의 변화로 초안을 만듭니다.</span></li>
+                <li className="flex gap-2"><span className="font-display text-lg leading-5 text-[#f4ca68]">3</span><span>핵심 부위는 사용자가 선택하므로 학습 목적을 직접 반영할 수 있습니다.</span></li>
               </ol>
             </section>
           </aside>
@@ -558,6 +903,26 @@ export default function Home() {
           <a className="inline-flex items-center font-bold text-[#2d7056] hover:text-[#17352b]" href="https://dot.apps-dotincorp.com/canvas" target="_blank" rel="noreferrer">Dot Canvas 열기 <ArrowRight className="ml-1 h-3.5 w-3.5" /></a>
         </section>
       </main>
+    </div>
+  );
+}
+
+function FocusPicker({ source, crop, onSelectCenter }: { source: string; crop: Crop; onSelectCenter: (x: number, y: number) => void }) {
+  function choosePosition(event: React.PointerEvent<HTMLDivElement>) {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    onSelectCenter(clamp((event.clientX - bounds.left) / bounds.width, 0, 1), clamp((event.clientY - bounds.top) / bounds.height, 0, 1));
+  }
+
+  return (
+    <div>
+      <div role="button" tabIndex={0} aria-label="원본 이미지에서 핵심 부위 중심 선택" className="focus-picker relative cursor-crosshair overflow-hidden rounded-2xl border border-[#c5d8cf] bg-[#f8faf8] shadow-inner" onPointerDown={choosePosition} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelectCenter(0.5, 0.5); }}>
+        <img className="block h-auto w-full select-none" src={source} alt="핵심 부위 선택용 원본 이미지" draggable={false} />
+        <div className="pointer-events-none absolute border-2 border-[#f4ca68] bg-[#f4ca68]/10 shadow-[0_0_0_9999px_rgba(9,28,20,.42)]" style={{ left: `${crop.x * 100}%`, top: `${crop.y * 100}%`, width: `${crop.width * 100}%`, height: `${crop.height * 100}%` }}>
+          <span className="absolute -top-7 left-0 whitespace-nowrap rounded-md bg-[#17352b] px-2 py-1 text-[10px] font-bold text-white">확대 영역</span>
+          <span className="absolute left-1/2 top-1/2 h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white bg-[#17352b]/80"><span className="absolute left-1/2 top-0 h-full border-l border-white/80" /><span className="absolute left-0 top-1/2 w-full border-t border-white/80" /></span>
+        </div>
+      </div>
+      <p className="mt-2 flex items-center gap-1.5 text-[11px] leading-4 text-slate-500"><ScanSearch className="h-3.5 w-3.5 text-[#507366]" />원본의 원하는 위치를 클릭해 확대 영역의 중심을 지정하세요.</p>
     </div>
   );
 }

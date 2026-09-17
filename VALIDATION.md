@@ -9,3 +9,7 @@ Within `queue-alpha.pdf`, native drag events moved its first candidate onto its 
 After the two reorder operations, individual conversion produced four learning units in this exact sequence: `queue-beta` 그림 1, `queue-beta` 그림 2, `queue-alpha` 그림 2, and `queue-alpha` 그림 1. The generated 12 tactile pages and the PDF-to-tactile learning-flow preview used the same sequence. A page reload restored that ordered flow, confirming browser draft persistence.
 
 DTMS export continues to use the generated tactile-page order, so the manual queue ordering is preserved in the exported workflow.
+
+## Archive UI redesign
+
+The interface was reworked into a restrained archive layout inspired by Are.na: white canvas, black one-pixel rules, square modular blocks, compact monospace metadata, and a blue selection state. Explanatory panels, tips, decorative badges, and redundant helper copy were removed from the visible interface while accessible names, focus indicators, tooltips, and live status text remain available. The primary workspace was verified in the browser at desktop width with no console errors. `pnpm check` and the production build completed successfully.

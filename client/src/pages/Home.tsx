@@ -1475,318 +1475,57 @@ export default function Home() {
   }
 
   return (
-    <div className="min-h-screen bg-[#f5f7f6] text-slate-900">
-      <header className="border-b border-slate-200/90 bg-white/80 backdrop-blur-xl">
-        <div className="mx-auto flex max-w-[1600px] items-center justify-between gap-4 px-5 py-4 lg:px-8">
-          <div className="flex items-center gap-3">
-            <div className="grid h-10 w-10 place-items-center rounded-2xl bg-[#17352b] shadow-[0_8px_18px_rgba(23,53,43,.22)]">
-              <Grid3X3 className="h-5 w-5 text-[#f4ca68]" aria-hidden="true" />
-            </div>
-            <div>
-              <p className="font-display text-lg leading-none tracking-tight text-[#17352b]">Tactile DTMS Studio</p>
-              <p className="mt-1 text-[11px] font-medium tracking-[0.12em] text-slate-500">DOT PAD 320 · 60 × 40</p>
-            </div>
-          </div>
-          <div aria-live="polite" className="hidden items-center gap-2 text-xs text-slate-500 md:flex">
-            <span className="h-2 w-2 rounded-full bg-emerald-500" /> {savedLabel}
-          </div>
-          <div className="flex items-center gap-2">
-            <Button size="icon" variant="outline" className="h-9 w-9 rounded-xl border-slate-200 bg-white" title="현재 작업 임시 저장" aria-label="현재 작업 임시 저장" onClick={saveTemporaryDraftNow} disabled={isSavingDraft}><Save className={cn("h-4 w-4", isSavingDraft && "animate-pulse")} /></Button>
-            <Button size="icon" variant="outline" className="h-9 w-9 rounded-xl border-slate-200 bg-white" title="실행 취소" aria-label="실행 취소" onClick={undoWorkspace} disabled={!undoCount}><Undo2 className="h-4 w-4" /></Button>
-            <Button size="icon" variant="outline" className="h-9 w-9 rounded-xl border-slate-200 bg-white" title="다시 실행" aria-label="다시 실행" onClick={redoWorkspace} disabled={!redoCount}><Redo2 className="h-4 w-4" /></Button>
-            <Button className="rounded-xl bg-[#17352b] px-4 text-white hover:bg-[#244b3d]" onClick={downloadDtms}>
-              <Download className="mr-2 h-4 w-4" /> DTMS 저장
-            </Button>
+    <div className="archive-shell min-h-screen bg-white text-[#111]">
+      <header className="archive-header border-b border-[#111] bg-white">
+        <div className="mx-auto flex max-w-[1800px] items-center justify-between gap-3 px-4 py-3 sm:px-6">
+          <div className="flex min-w-0 items-baseline gap-3"><h1 className="text-base font-bold tracking-[-.04em]">tactile atlas</h1><span className="hidden text-[10px] uppercase tracking-[.12em] text-zinc-500 sm:inline">DTMS · 60 × 40</span></div>
+          <div className="flex items-center gap-1.5">
+            <span aria-live="polite" className="sr-only">{savedLabel}</span>
+            <Button size="icon" variant="outline" className="archive-icon-button" title="현재 작업 임시 저장" aria-label="현재 작업 임시 저장" onClick={saveTemporaryDraftNow} disabled={isSavingDraft}><Save className={cn("h-4 w-4", isSavingDraft && "animate-pulse")} /></Button>
+            <Button size="icon" variant="outline" className="archive-icon-button" title="실행 취소" aria-label="실행 취소" onClick={undoWorkspace} disabled={!undoCount}><Undo2 className="h-4 w-4" /></Button>
+            <Button size="icon" variant="outline" className="archive-icon-button" title="다시 실행" aria-label="다시 실행" onClick={redoWorkspace} disabled={!redoCount}><Redo2 className="h-4 w-4" /></Button>
+            <Button className="archive-primary-button ml-1" onClick={downloadDtms}><Download className="mr-2 h-4 w-4" />DTMS</Button>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1600px] px-5 py-7 lg:px-8">
-        <section className="mb-7 flex flex-col justify-between gap-4 rounded-[24px] border border-[#d9e3df] bg-[radial-gradient(circle_at_75%_20%,#f8eac8_0%,transparent_25%),linear-gradient(130deg,#e9f2ee_0%,#fdfcf8_58%,#f6f3ed_100%)] px-6 py-6 shadow-sm lg:flex-row lg:items-end lg:px-8">
-          <div className="max-w-2xl">
-            <p className="mb-2 text-xs font-bold tracking-[0.16em] text-[#557469]">촉각 교육용 구조도 만들기</p>
-            <h1 className="font-display text-3xl tracking-tight text-[#17352b] sm:text-4xl">한 장의 이미지에서<br className="hidden sm:block" /> 세 단계 촉각 구조도를 만드세요.</h1>
-            <p className="mt-3 max-w-xl text-sm leading-6 text-slate-600">업로드 즉시 전체 형태·구조 구분·핵심 부위 확대 초안을 만들고, 원본에서 직접 핵심 위치를 선택해 세 번째 페이지를 바꾼 뒤 Dot Pad용 DTMS로 저장합니다.</p>
-          </div>
-          <div className="flex flex-wrap gap-2 text-xs font-medium text-[#315c4d]">
-            <span className="rounded-full border border-[#bdd4c9] bg-white/70 px-3 py-1.5">무료 · 계정 불필요</span>
-            <span className="rounded-full border border-[#bdd4c9] bg-white/70 px-3 py-1.5">3페이지 자동 초안</span>
-            <span className="rounded-full border border-[#bdd4c9] bg-white/70 px-3 py-1.5">여러 PDF 일괄 검토</span>
-            <span className="rounded-full border border-[#bdd4c9] bg-white/70 px-3 py-1.5">클릭하여 핵심 부위 선택</span>
+      <main className="mx-auto max-w-[1800px] px-4 py-4 sm:px-6">
+        <section className="mb-4 grid border border-[#111] sm:grid-cols-[1fr_auto]">
+          <div className="p-4 sm:p-5"><p className="text-xs font-medium uppercase tracking-[.12em] text-zinc-500">image to tactile diagram</p><p className="mt-1 text-xl font-bold tracking-[-.05em] sm:text-2xl">Tactile Atlas</p></div>
+          <div className="flex border-t border-[#111] sm:border-l sm:border-t-0">
+            <input ref={uploadRef} aria-label="이미지 또는 PDF 파일 선택" type="file" accept="image/png,image/jpeg,image/webp,application/pdf" className="pointer-events-none absolute h-px w-px opacity-0" onChange={(event) => handleFile(event.target.files?.[0])} />
+            <input ref={batchUploadRef} aria-label="여러 PDF 파일 대기열 선택" type="file" accept="application/pdf,.pdf" multiple className="pointer-events-none absolute h-px w-px opacity-0" onChange={(event) => { void handlePdfBatch(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} />
+            <Button variant="ghost" className="archive-action-button flex-1 border-r border-[#111]" onClick={() => uploadRef.current?.click()} disabled={isLoading}>{isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}FILE</Button>
+            <Button variant="ghost" className="archive-action-button flex-1" onClick={() => batchUploadRef.current?.click()} disabled={isLoading}><Files className="mr-2 h-4 w-4" />PDFs</Button>
           </div>
         </section>
 
         {(pdfCandidates.length > 0 || batchDocuments.length > 0) && (
-          <section className="mb-7 overflow-hidden rounded-[24px] border border-[#b8d5c7] bg-white shadow-[0_14px_28px_rgba(31,73,57,.08)]">
-            <div className="flex flex-col gap-4 border-b border-[#dcebe3] bg-[linear-gradient(120deg,#eaf4ef_0%,#fdfbf3_100%)] px-5 py-5 lg:flex-row lg:items-center lg:justify-between lg:px-6">
-              <div className="flex gap-3">
-                <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#17352b] text-[#f4ca68]"><FileImage className="h-5 w-5" /></div>
-                <div>
-                  <p className="text-sm font-bold text-[#17352b]">PDF 그림 후보 일괄 검토</p>
-                  <p className="mt-1 text-xs leading-5 text-[#527267]"><strong>{reviewFileName}</strong> 대기열에서 감지한 {pdfCandidates.length}개 후보입니다. 파일 순서대로 후보를 고르고, 같은 PDF 페이지의 선택 그림은 하나의 원본으로 병합할 수 있습니다.</p>
-                </div>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline" className="h-9 rounded-xl border-[#b7d4c5] bg-white text-xs" onClick={() => batchUploadRef.current?.click()} disabled={isLoading}><Files className="mr-1.5 h-3.5 w-3.5" />PDF 추가</Button>
-                <Button variant="outline" className="h-9 rounded-xl border-[#b7d4c5] bg-white text-xs" onClick={() => setAllCandidates(true)}>모두 포함</Button>
-                <Button variant="outline" className="h-9 rounded-xl border-[#b7d4c5] bg-white text-xs" onClick={() => setAllCandidates(false)}>모두 제외</Button>
-                <Button variant="outline" className={cn("h-9 rounded-xl border-[#b7d4c5] bg-white text-xs", showTextOverlay && "bg-[#17352b] text-white hover:bg-[#244b3d] hover:text-white")} onClick={() => setShowTextOverlay((current) => !current)}>{showTextOverlay ? <EyeOff className="mr-1.5 h-3.5 w-3.5" /> : <Eye className="mr-1.5 h-3.5 w-3.5" />}{showTextOverlay ? "본문 제외 영역 숨기기" : "본문 제외 영역 보기"}</Button>
-              </div>
+          <section className="archive-card mb-4">
+            <div className="archive-section-heading"><span>QUEUE</span><span>{orderedDocuments.length} files · {pdfCandidates.length} blocks</span><div className="ml-auto flex gap-1"><Button variant="ghost" className="archive-mini-button" onClick={() => setAllCandidates(true)}>all</Button><Button variant="ghost" className="archive-mini-button" onClick={() => setAllCandidates(false)}>none</Button><Button variant="ghost" className="archive-mini-button" aria-pressed={showTextOverlay} onClick={() => setShowTextOverlay((current) => !current)}>{showTextOverlay ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}</Button></div></div>
+            <div className="grid divide-y divide-[#111] border-b border-[#111] sm:grid-cols-2 sm:divide-x sm:divide-y-0 lg:grid-cols-3">
+              {orderedDocuments.map((document, index) => <div key={document.id} onDragOver={(event) => { if (draggedDocumentId) event.preventDefault(); }} onDrop={(event) => { event.preventDefault(); if (draggedDocumentId) reorderDocuments(draggedDocumentId, document.id); setDraggedDocumentId(null); }} className={cn("flex min-w-0 items-center gap-2 p-3 transition", draggedDocumentId === document.id && "bg-[#dfe5ff]", document.status === "error" && "bg-rose-50")}><div draggable aria-label={`${document.name} 순서 변경`} title="끌어서 PDF 순서 변경" className="archive-drag-handle" onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", document.id); setDraggedDocumentId(document.id); }} onDragEnd={() => setDraggedDocumentId(null)}><GripVertical className="h-4 w-4" /></div><span className="text-xs text-zinc-500">{String(index + 1).padStart(2, "0")}</span><span className="min-w-0 flex-1 truncate text-xs font-medium">{document.name}</span><span className="text-[10px] text-zinc-500">{document.status === "analyzing" ? <Loader2 className="h-3 w-3 animate-spin" /> : `${document.selectedCount}/${document.candidateCount}`}</span></div>)}
             </div>
-
-            <div className="border-b border-[#dcebe3] bg-[#fbfdfb] px-5 py-4 lg:px-6">
-              <p className="mb-2 text-[11px] font-bold text-[#507366]"><GripVertical className="mr-1 inline h-3.5 w-3.5" />PDF 파일은 손잡이를 끌어 순서를 바꿀 수 있습니다. 아래 그림 후보도 같은 PDF 안에서 순서를 바꿀 수 있습니다.</p>
-              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {orderedDocuments.map((document, index) => (
-                <div key={document.id} onDragOver={(event) => { if (draggedDocumentId) event.preventDefault(); }} onDrop={(event) => { event.preventDefault(); if (draggedDocumentId) reorderDocuments(draggedDocumentId, document.id); setDraggedDocumentId(null); }} className={cn("flex items-center gap-3 rounded-xl border px-3 py-2.5 transition", draggedDocumentId === document.id && "scale-[.98] border-dashed border-[#b57d16] bg-[#fff8e8] opacity-70", document.status === "error" ? "border-rose-200 bg-rose-50" : document.status === "analyzing" ? "border-[#e9c66e] bg-[#fffaf0]" : "border-[#d8e7df] bg-white")}>
-                  <div draggable aria-label={`${document.name} 순서 변경`} title="끌어서 PDF 순서 변경" className="grid h-7 w-5 shrink-0 place-items-center rounded-md text-[#78958a] transition hover:bg-[#e7f1eb] hover:text-[#17352b] active:cursor-grabbing" onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", document.id); setDraggedDocumentId(document.id); }} onDragEnd={() => setDraggedDocumentId(null)}><GripVertical className="h-4 w-4" /></div>
-                  <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg bg-[#17352b] text-[11px] font-bold text-[#f4ca68]">{index + 1}</span>
-                  <span className="min-w-0 flex-1"><span className="block truncate text-xs font-bold text-[#17352b]">{document.name}</span><span className="mt-0.5 block text-[10px] text-slate-500">{document.status === "analyzing" ? "그림·본문 영역 분석 중…" : document.status === "error" ? document.error ?? "분석 실패" : `${document.candidateCount}개 후보 · ${document.selectedCount}개 포함`}</span></span>
-                  {document.status === "analyzing" && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[#b57d16]" />}
-                </div>
-              ))}
-              </div>
+            <div className="archive-masonry p-3 sm:p-4">
+              {orderedCandidates.map((candidate) => <article key={candidate.id} onDragOver={(event) => { if (draggedCandidateId) event.preventDefault(); }} onDrop={(event) => { event.preventDefault(); if (draggedCandidateId) reorderCandidates(draggedCandidateId, candidate.id); setDraggedCandidateId(null); }} className={cn("break-inside-avoid border border-[#111] bg-white transition", draggedCandidateId === candidate.id && "bg-[#dfe5ff]", !candidate.selected && "opacity-40")}><CandidateBoundaryEditor source={candidate.pagePreview} crop={candidate.crop} textRegions={candidate.textRegions} showTextOverlay={showTextOverlay} documentLabel={`${candidate.documentName} · ${candidate.pageNumber} · ${candidate.candidateOrder + 1}`} detection={candidate.detection} onCommit={(crop) => void updateCandidateBoundary(candidate.id, crop)} /><div className="flex items-center gap-2 border-t border-[#111] p-2"><div draggable aria-label={`${candidate.label} 순서 변경`} title="끌어서 그림 후보 순서 변경" className="archive-drag-handle" onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", candidate.id); setDraggedCandidateId(candidate.id); }} onDragEnd={() => setDraggedCandidateId(null)}><GripVertical className="h-4 w-4" /></div><span className="min-w-0 flex-1 truncate text-[11px]">{candidate.label}</span><Button variant="ghost" size="sm" className="archive-select-button" onClick={() => toggleCandidate(candidate.id)} aria-label={`${candidate.label} ${candidate.selected ? "변환에서 제외" : "변환에 포함"}`}>{candidate.selected ? <Check className="h-4 w-4" /> : <X className="h-4 w-4" />}</Button></div></article>)}
             </div>
-
-            <div className="grid gap-4 p-5 md:grid-cols-2 xl:grid-cols-3 lg:p-6">
-              {orderedCandidates.map((candidate) => (
-                <article key={candidate.id} onDragOver={(event) => { if (draggedCandidateId) event.preventDefault(); }} onDrop={(event) => { event.preventDefault(); if (draggedCandidateId) reorderCandidates(draggedCandidateId, candidate.id); setDraggedCandidateId(null); }} className={cn("overflow-hidden rounded-2xl border bg-white transition", draggedCandidateId === candidate.id && "scale-[.98] border-dashed border-[#b57d16] bg-[#fff8e8] opacity-70", candidate.selected ? "border-[#5a9a79] shadow-[0_8px_20px_rgba(41,103,76,.12)]" : "border-slate-200 opacity-65")}> 
-                  <CandidateBoundaryEditor source={candidate.pagePreview} crop={candidate.crop} textRegions={candidate.textRegions} showTextOverlay={showTextOverlay} documentLabel={`${candidate.documentName} · ${candidate.pageNumber}쪽 · 후보 ${candidate.candidateOrder + 1}`} detection={candidate.detection} onCommit={(crop) => void updateCandidateBoundary(candidate.id, crop)} />
-                  <div className="p-3">
-                    <div className="flex items-start gap-3">
-                      <img className="h-16 w-20 rounded-lg border border-slate-200 bg-[#fafbf9] object-contain" src={candidate.source} alt={`${candidate.label} 추출 이미지`} />
-                      <div className="min-w-0 flex-1"><div className="flex items-center gap-1"><div draggable aria-label={`${candidate.label} 순서 변경`} title="끌어서 그림 후보 순서 변경" className="grid h-6 w-5 shrink-0 place-items-center rounded-md text-[#78958a] transition hover:bg-[#e7f1eb] hover:text-[#17352b] active:cursor-grabbing" onDragStart={(event) => { event.stopPropagation(); event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", candidate.id); setDraggedCandidateId(candidate.id); }} onDragEnd={() => setDraggedCandidateId(null)}><GripVertical className="h-4 w-4" /></div><p className="truncate text-xs font-bold text-slate-700">{candidate.label}</p></div><p className="mt-1 text-[11px] leading-4 text-slate-500"><PencilRuler className="mr-1 inline h-3 w-3 text-[#b57d16]" />손잡이로 후보 순서를 바꾸고, 노란 경계로 추출 영역을 보정합니다.</p></div>
-                    </div>
-                    <Button variant={candidate.selected ? "default" : "outline"} className={cn("mt-3 h-8 w-full rounded-lg text-xs", candidate.selected ? "bg-[#17352b] text-white hover:bg-[#244b3d]" : "border-slate-200 text-slate-600")} onClick={() => toggleCandidate(candidate.id)}>{candidate.selected ? <Check className="mr-1.5 h-3.5 w-3.5" /> : <X className="mr-1.5 h-3.5 w-3.5" />}{candidate.selected ? "변환에 포함" : "변환에서 제외"}</Button>
-                  </div>
-                </article>
-              ))}
-            </div>
-
-            <div className="flex flex-col gap-3 border-t border-[#dcebe3] bg-[#f8fbf9] px-5 py-4 sm:flex-row sm:items-center sm:justify-between lg:px-6">
-              <p className="text-xs leading-5 text-[#527267]"><strong className="text-[#17352b]">{pdfCandidates.filter((candidate) => candidate.selected).length}개 선택됨.</strong> 개별 변환은 그림마다 3페이지를 생성하고, 병합 변환은 같은 페이지의 선택 영역을 하나의 원본으로 합칩니다.</p>
-              <div className="flex flex-wrap gap-2">
-                <Button variant="outline" className="rounded-xl border-[#9ec3af] bg-white text-xs text-[#17352b]" onClick={() => void convertReviewedCandidates(false)} disabled={isGenerating}><FilePlus2 className="mr-1.5 h-3.5 w-3.5" />개별 변환</Button>
-                <Button className="rounded-xl bg-[#e0a93a] text-xs font-bold text-[#17352b] hover:bg-[#f1bd51]" onClick={() => void convertReviewedCandidates(true)} disabled={isGenerating}>{isGenerating ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Layers3 className="mr-1.5 h-3.5 w-3.5" />}선택 병합 변환</Button>
-              </div>
-            </div>
+            <div className="flex border-t border-[#111]"><Button variant="ghost" className="archive-action-button flex-1 border-r border-[#111]" onClick={() => void convertReviewedCandidates(false)} disabled={isGenerating}><FilePlus2 className="mr-2 h-4 w-4" />INDIVIDUAL</Button><Button variant="ghost" className="archive-action-button flex-1" onClick={() => void convertReviewedCandidates(true)} disabled={isGenerating}>{isGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Layers3 className="mr-2 h-4 w-4" />}MERGE</Button></div>
           </section>
         )}
 
-        {learningFlow.length > 0 && (
-          <section className="mb-7 overflow-hidden rounded-[24px] border border-[#cadcd4] bg-white shadow-[0_14px_28px_rgba(31,73,57,.08)]">
-            <div className="flex flex-col gap-3 border-b border-[#dcebe3] bg-[linear-gradient(120deg,#f1f7f3_0%,#fdf9ea_100%)] px-5 py-5 lg:flex-row lg:items-center lg:justify-between lg:px-6">
-              <div className="flex gap-3">
-                <div className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-[#17352b] text-[#f4ca68]"><BookOpen className="h-5 w-5" /></div>
-                <div><p className="text-sm font-bold text-[#17352b]">PDF → 촉각 학습 흐름</p><p className="mt-1 text-xs leading-5 text-[#527267]">PDF 파일·페이지 순서를 유지해, 각 그림의 설명과 연결된 전체·구조·확대 촉각 페이지를 확인합니다.</p></div>
-              </div>
-              <span className="rounded-full bg-white px-3 py-1.5 text-xs font-bold text-[#315c4d] shadow-sm">{learningFlow.length}개 학습 단위 · {learningFlow.reduce((total, entry) => total + entry.pageIds.length, 0)}개 촉각 페이지</span>
-            </div>
-            <div className="space-y-0 divide-y divide-[#e3ece7]">
-              {learningFlow.slice().sort((left, right) => left.documentOrder - right.documentOrder || left.candidateOrder - right.candidateOrder).map((entry, index) => {
-                const tactilePages = entry.pageIds.map((pageId) => pages.find((page) => page.id === pageId)).filter((page): page is TactilePage => Boolean(page));
-                return (
-                  <article key={entry.id} className="grid gap-4 px-5 py-5 lg:grid-cols-[42px_148px_minmax(0,1fr)_minmax(280px,.95fr)] lg:items-center lg:px-6">
-                    <div className="flex lg:flex-col lg:items-center"><span className="grid h-8 w-8 place-items-center rounded-xl bg-[#17352b] text-xs font-bold text-[#f4ca68]">{index + 1}</span><ChevronRight className="ml-2 h-4 w-4 text-[#a6bcaf] lg:ml-0 lg:mt-1 lg:rotate-90" /></div>
-                    <img src={entry.source} alt={`${entry.documentName} ${entry.pageNumber}쪽에서 선택한 그림`} className="aspect-[4/3] w-full rounded-xl border border-[#d7e5de] bg-[#fbfcfa] object-contain" />
-                    <div className="min-w-0"><p className="text-xs font-bold text-[#17352b]">{entry.documentName} · {entry.pageNumber}쪽</p><p className="mt-1 truncate text-[11px] font-medium text-[#527267]">{entry.label}</p><Label htmlFor={`flow-description-${entry.id}`} className="mt-3 block text-[11px] font-bold text-slate-600">그림 설명</Label><Textarea id={`flow-description-${entry.id}`} className="mt-1 min-h-20 rounded-xl border-[#d8e7df] bg-[#fbfdfb] text-xs leading-5" value={entry.description} onFocus={recordHistory} onChange={(event) => updateLearningDescription(entry.id, event.target.value)} /></div>
-                    <div className="rounded-2xl border border-[#d8e7df] bg-[#f8fbf9] p-3"><p className="text-[11px] font-bold text-[#315c4d]">연결된 촉각 페이지</p><div className="mt-2 grid grid-cols-3 gap-2">{tactilePages.map((page) => <button key={page.id} onClick={() => { setSelectedId(page.id); setStatus(`${entry.documentName} ${entry.pageNumber}쪽과 연결된 ${pageInfo(page.kind).title} 페이지를 열었습니다.`); }} className={cn("rounded-lg border px-2 py-2 text-center text-[10px] font-bold transition", page.id === selectedId ? "border-[#2e7759] bg-[#17352b] text-white" : "border-[#cfe0d7] bg-white text-[#315c4d] hover:bg-[#e9f3ed]")}>{pageInfo(page.kind).title.replace(/^\d\. /, "")}</button>)}</div><Button variant="outline" className="mt-3 h-8 w-full rounded-lg border-[#a6c7b6] bg-white text-[11px] text-[#17352b]" onClick={() => openLearningEntry(entry)}>이 학습 단위 열기 <ArrowRight className="ml-1.5 h-3.5 w-3.5" /></Button></div>
-                  </article>
-                );
-              })}
-            </div>
-          </section>
-        )}
+        {learningFlow.length > 0 && <section className="archive-card mb-4"><div className="archive-section-heading"><span>FLOW</span><span>{learningFlow.length}</span></div><div className="grid divide-y divide-[#111] md:grid-cols-2 md:divide-x md:divide-y-0 xl:grid-cols-4">{learningFlow.slice().sort((left, right) => left.documentOrder - right.documentOrder || left.candidateOrder - right.candidateOrder).map((entry, index) => { const tactilePages = entry.pageIds.map((pageId) => pages.find((page) => page.id === pageId)).filter((page): page is TactilePage => Boolean(page)); return <article key={entry.id} className="p-3"><div className="flex items-center justify-between text-[10px] text-zinc-500"><span>{String(index + 1).padStart(2, "0")}</span><span>{entry.documentName} · {entry.pageNumber}</span></div><img src={entry.source} alt={`${entry.documentName} ${entry.pageNumber}쪽에서 선택한 그림`} className="mt-2 aspect-[4/3] w-full border border-[#111] object-contain" /><Textarea aria-label={`${entry.label} 그림 설명`} id={`flow-description-${entry.id}`} className="mt-2 min-h-16 border-[#111] bg-transparent text-xs" value={entry.description} onFocus={recordHistory} onChange={(event) => updateLearningDescription(entry.id, event.target.value)} /><div className="mt-2 flex gap-1">{tactilePages.map((page) => <button key={page.id} title={pageInfo(page.kind).title} aria-label={`${entry.label} ${pageInfo(page.kind).title} 열기`} onClick={() => { setSelectedId(page.id); setStatus(`${entry.documentName} ${entry.pageNumber}쪽과 연결된 ${pageInfo(page.kind).title} 페이지를 열었습니다.`); }} className={cn("archive-page-dot", page.id === selectedId && "bg-[#2f45ff] text-white")}>{pageInfo(page.kind).title.slice(0, 1)}</button>)}<Button variant="ghost" size="sm" className="archive-open-button ml-auto" onClick={() => openLearningEntry(entry)} aria-label={`${entry.label} 학습 단위 열기`}><ArrowRight className="h-4 w-4" /></Button></div></article>; })}</div></section>}
 
-        {activeSourceSet ? (
-          <section className="mb-7 overflow-hidden rounded-[24px] border border-[#cadcd4] bg-white shadow-sm">
-            <div className="flex flex-col justify-between gap-3 border-b border-[#e3ece7] bg-[#f5f9f6] px-5 py-4 sm:flex-row sm:items-center sm:px-6">
-              <div className="flex items-center gap-3">
-                <div className="grid h-9 w-9 place-items-center rounded-xl bg-[#17352b] text-[#f4ca68]"><LocateFixed className="h-4.5 w-4.5" /></div>
-                <div>
-                  <h2 className="text-sm font-bold text-[#17352b]">핵심 부위 선택</h2>
-                  <p className="text-xs text-slate-500">원본을 클릭하면 확대 범위가 이동하고, 3번째 촉각 페이지가 자동으로 갱신됩니다.</p>
-                </div>
-              </div>
-              <span className="rounded-full bg-white px-3 py-1 text-xs font-bold text-[#315c4d] shadow-sm">{activeSourceSet.label}</span>
-            </div>
-            <div className="grid gap-5 p-5 lg:grid-cols-[minmax(0,1fr)_310px] lg:p-6">
-              <FocusPicker source={activeSourceSet.source} crop={activeSourceSet.selectedCrop} onSelectCenter={selectFocusAt} onCommit={selectFocusCrop} />
-              <div className="flex flex-col">
-                <p className="text-xs font-bold tracking-[0.1em] text-[#507366]">자동 탐색 후보</p>
-                <p className="mt-1 text-xs leading-5 text-slate-500">경계와 색 변화가 밀집된 곳을 후보로 찾았습니다. 교육에 중요한 부분이 다르면 원본을 직접 클릭해 옮기세요.</p>
-                <div className="mt-3 grid grid-cols-3 gap-2">
-                  {activeSourceSet.candidates.map((candidate) => {
-                    const chosen = Math.abs(candidate.crop.x - activeSourceSet.selectedCrop.x) < 0.01 && Math.abs(candidate.crop.y - activeSourceSet.selectedCrop.y) < 0.01;
-                    return (
-                      <button key={candidate.id} onClick={() => selectFocusCrop(candidate.crop)} className={cn("rounded-xl border px-2 py-2 text-left text-xs font-bold transition", chosen ? "border-[#2e7759] bg-[#e7f2ec] text-[#17352b] shadow-sm" : "border-slate-200 bg-white text-slate-600 hover:border-[#9ab9ab]")}>{candidate.label}</button>
-                    );
-                  })}
-                </div>
-                <div className="mt-5 border-t border-slate-100 pt-4">
-                  <div className="flex items-center justify-between"><p className="text-xs font-bold text-slate-700">확대 범위</p><span className="text-[11px] text-slate-500">가로·세로 독립 조절</span></div>
-                  <div className="mt-2 grid grid-cols-3 gap-2">
-                    {[
-                      ["좁게", 0.34],
-                      ["보통", 0.5],
-                      ["넓게", 0.68],
-                    ].map(([label, width]) => (
-                      <button key={String(label)} onClick={() => changeFocusScale(Number(width))} className={cn("rounded-lg px-2 py-2 text-xs font-bold transition", Math.abs(activeSourceSet.selectedCrop.width - Number(width)) < 0.08 ? "bg-[#17352b] text-white" : "bg-slate-100 text-slate-600 hover:bg-[#e7f2ec]")}>{label}</button>
-                    ))}
-                  </div>
-                </div>
-                <div className="mt-4 grid grid-cols-2 gap-3 border-t border-slate-100 pt-4">
-                  <CropSlider label="가로" value={Number((activeSourceSet.selectedCrop.width * 100).toFixed(1))} min={12} max={96} step={0.1} suffix="%" onChange={(value) => updateFocusCrop({ width: value / 100 })} />
-                  <CropSlider label="세로" value={Number((activeSourceSet.selectedCrop.height * 100).toFixed(1))} min={12} max={96} step={0.1} suffix="%" onChange={(value) => updateFocusCrop({ height: value / 100 })} />
-                </div>
-                <div className="mt-3 border-t border-slate-100 pt-4">
-                  <CropSlider label="회전" value={Math.round(activeSourceSet.selectedCrop.rotation)} min={-180} max={180} step={1} suffix="°" onChange={(value) => updateFocusCrop({ rotation: value })} />
-                </div>
-                <div className="mt-auto rounded-xl bg-[#17352b] px-3 py-3 text-xs leading-5 text-white/80">
-                  <Maximize2 className="mr-1.5 inline h-3.5 w-3.5 text-[#f4ca68]" />
-                  {isFocusing ? "선택한 부위를 60×40 촉각 격자로 바꾸는 중…" : "선택한 범위는 ‘3. 핵심 부위 확대’ 페이지에 반영됩니다."}
-                </div>
-              </div>
-            </div>
-          </section>
-        ) : (
-          <section className="mb-7 grid gap-3 rounded-[24px] border border-dashed border-[#adc8ba] bg-[#eff6f2] p-5 sm:grid-cols-3 sm:p-6">
-            {[
-              ["1", "전체 형태", "가장 큰 외곽 형태를 우선 추립니다."],
-              ["2", "구조 구분", "경계·반복 구조를 촉각선으로 바꿉니다."],
-              ["3", "핵심 부위 확대", "원본에서 직접 위치를 골라 확대합니다."],
-            ].map(([number, title, description]) => (
-              <div key={number} className="flex gap-3 rounded-xl bg-white/70 p-3"><span className="font-display text-2xl leading-6 text-[#c28d25]">{number}</span><div><p className="text-xs font-bold text-[#17352b]">{title}</p><p className="mt-1 text-[11px] leading-4 text-slate-500">{description}</p></div></div>
-            ))}
-          </section>
-        )}
+        {activeSourceSet && <section className="archive-card mb-4"><div className="archive-section-heading"><span>FOCUS</span><span className="truncate">{activeSourceSet.label}</span></div><div className="grid lg:grid-cols-[minmax(0,1fr)_280px]"><div className="border-b border-[#111] p-3 lg:border-b-0 lg:border-r"><FocusPicker source={activeSourceSet.source} crop={activeSourceSet.selectedCrop} onSelectCenter={selectFocusAt} onCommit={selectFocusCrop} /></div><div className="p-3"><div className="grid grid-cols-3 gap-1">{activeSourceSet.candidates.map((candidate) => { const chosen = Math.abs(candidate.crop.x - activeSourceSet.selectedCrop.x) < 0.01 && Math.abs(candidate.crop.y - activeSourceSet.selectedCrop.y) < 0.01; return <button key={candidate.id} onClick={() => selectFocusCrop(candidate.crop)} className={cn("archive-choice-button", chosen && "bg-[#2f45ff] text-white")}>{candidate.label}</button>; })}</div><div className="mt-4 grid grid-cols-3 gap-1">{[["S", 0.34], ["M", 0.5], ["L", 0.68]].map(([label, width]) => <button key={String(label)} onClick={() => changeFocusScale(Number(width))} className={cn("archive-choice-button", Math.abs(activeSourceSet.selectedCrop.width - Number(width)) < 0.08 && "bg-[#111] text-white")}>{label}</button>)}</div><div className="mt-5 grid grid-cols-2 gap-3"><CropSlider label="W" value={Number((activeSourceSet.selectedCrop.width * 100).toFixed(1))} min={12} max={96} step={0.1} suffix="%" onChange={(value) => updateFocusCrop({ width: value / 100 })} /><CropSlider label="H" value={Number((activeSourceSet.selectedCrop.height * 100).toFixed(1))} min={12} max={96} step={0.1} suffix="%" onChange={(value) => updateFocusCrop({ height: value / 100 })} /></div><div className="mt-4"><CropSlider label="R" value={Math.round(activeSourceSet.selectedCrop.rotation)} min={-180} max={180} step={1} suffix="°" onChange={(value) => updateFocusCrop({ rotation: value })} /></div><span aria-live="polite" className="sr-only">{isFocusing ? "핵심 부위를 변환 중" : "핵심 부위 설정 완료"}</span></div></div></section>}
 
-        <div className="grid gap-6 xl:grid-cols-[280px_minmax(0,1fr)_320px]">
-          <aside className="order-2 rounded-[22px] border border-slate-200 bg-white p-4 shadow-sm xl:order-1">
-            <div className="mb-4 flex items-center justify-between">
-              <div>
-                <p className="text-sm font-bold text-slate-800">DTMS 페이지</p>
-                <p className="text-xs text-slate-500">자동 초안과 수동 도식을 함께 저장</p>
-              </div>
-              <span className="grid h-7 min-w-7 place-items-center rounded-full bg-[#edf4f0] px-2 text-xs font-bold text-[#315c4d]">{pages.length}</span>
-            </div>
-            <div className="space-y-2">
-              {pages.map((page, index) => {
-                const info = pageInfo(page.kind);
-                return (
-                  <button key={page.id} className={cn("group flex w-full items-center gap-3 rounded-xl p-2 text-left transition", page.id === selectedId ? "bg-[#e8f1ed] ring-1 ring-[#b3cebf]" : "hover:bg-slate-50")} onClick={() => setSelectedId(page.id)}>
-                    <div className="grid h-11 w-14 shrink-0 place-items-center rounded-lg border border-slate-200 bg-[#fcfcfa]"><MiniGrid grid={page.grid} /></div>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs font-bold text-slate-700">{page.title || `페이지 ${index + 1}`}</span>
-                      <span className="mt-1 flex items-center gap-1 text-[10px] text-slate-500"><span className="rounded bg-white px-1 text-[#507366]">{info.description}</span><span>{dotCount(page.grid)}점</span></span>
-                    </span>
-                    {page.id === selectedId && <Check className="h-4 w-4 shrink-0 text-[#2d7a58]" />}
-                  </button>
-                );
-              })}
-            </div>
-            <div className="mt-4 grid grid-cols-2 gap-2">
-              <Button variant="outline" className="rounded-xl border-slate-200 text-xs" onClick={addBlankPage}><FilePlus2 className="mr-1.5 h-3.5 w-3.5" /> 빈 페이지</Button>
-              <Button variant="outline" className="rounded-xl border-slate-200 text-xs" onClick={duplicatePage}><Layers3 className="mr-1.5 h-3.5 w-3.5" /> 복제</Button>
-            </div>
-            <div className="mt-6 rounded-xl bg-[#f6f7f5] p-3">
-              <p className="mb-1 text-xs font-bold text-[#315c4d]">촉각 설계 팁</p>
-              <p className="text-[11px] leading-5 text-slate-600">자동 결과는 초안입니다. 라벨·긴 지시선·미세한 잔선은 지우개로 빼고, 중요한 구조 사이에는 빈 공간을 남기세요.</p>
-            </div>
-          </aside>
+        <div className="grid gap-4 xl:grid-cols-[260px_minmax(0,1fr)_280px]">
+          <aside className="archive-card order-2 xl:order-1"><div className="archive-section-heading"><span>PAGES</span><span>{pages.length}</span></div><div className="divide-y divide-[#111]">{pages.map((page, index) => <button key={page.id} className={cn("flex w-full items-center gap-2 p-2 text-left transition hover:bg-[#f1f1f1]", page.id === selectedId && "bg-[#dfe5ff]")} onClick={() => setSelectedId(page.id)}><div className="grid h-10 w-14 shrink-0 place-items-center border border-[#111] bg-white"><MiniGrid grid={page.grid} /></div><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{page.title || `PAGE ${index + 1}`}</span><span className="text-[10px] text-zinc-500">{dotCount(page.grid)} dots</span></span></button>)}</div><div className="grid grid-cols-2 border-t border-[#111]"><Button variant="ghost" className="archive-action-button border-r border-[#111]" onClick={addBlankPage}><FilePlus2 className="mr-2 h-4 w-4" />NEW</Button><Button variant="ghost" className="archive-action-button" onClick={duplicatePage}><Layers3 className="mr-2 h-4 w-4" />COPY</Button></div></aside>
 
-          <section className="order-1 min-w-0 xl:order-2">
-            <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
-              <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <p className="text-sm font-bold text-slate-800">60 × 40 촉각 편집기</p>
-                  <p className="text-xs text-slate-500">{pageInfo(activePage?.kind ?? "manual").title} · 클릭하거나 드래그해서 점을 추가·제거합니다.</p>
-                </div>
-                <div className="flex rounded-xl bg-slate-100 p-1">
-                  <Button size="sm" variant="ghost" className={cn("h-8 rounded-lg px-3 text-xs", tool === "draw" && "bg-white shadow-sm")} onClick={() => setTool("draw")}><MousePointer2 className="mr-1.5 h-3.5 w-3.5" /> 점 찍기</Button>
-                  <Button size="sm" variant="ghost" className={cn("h-8 rounded-lg px-3 text-xs", tool === "erase" && "bg-white shadow-sm")} onClick={() => setTool("erase")}><Eraser className="mr-1.5 h-3.5 w-3.5" /> 지우기</Button>
-                </div>
-              </div>
+          <section className="archive-card order-1 min-w-0 xl:order-2"><div className="archive-section-heading"><span>CANVAS</span><span>{pageInfo(activePage?.kind ?? "manual").title}</span><div className="ml-auto flex gap-1"><Button size="sm" variant="ghost" className={cn("archive-mini-button", tool === "draw" && "bg-[#111] text-white hover:bg-[#111] hover:text-white")} onClick={() => setTool("draw")}><MousePointer2 className="mr-1 h-3.5 w-3.5" />DRAW</Button><Button size="sm" variant="ghost" className={cn("archive-mini-button", tool === "erase" && "bg-[#111] text-white hover:bg-[#111] hover:text-white")} onClick={() => setTool("erase")}><Eraser className="mr-1 h-3.5 w-3.5" />ERASE</Button></div></div><div className="grid gap-3 p-3 lg:grid-cols-[minmax(0,1fr)_190px]"><div className="border border-[#111] bg-[#f7f7f7] p-3 sm:p-4"><div role="application" aria-label="60 곱하기 40 촉각 점자 격자. 클릭하여 점을 편집합니다." className="tactile-grid mx-auto aspect-[3/2] w-full max-w-[760px] touch-none select-none bg-white p-[2.3%]" onPointerDown={handleGridPointerDown} onPointerMove={handleGridPointerMove} onPointerUp={() => setIsDrawing(false)} onPointerLeave={() => setIsDrawing(false)} onPointerCancel={() => setIsDrawing(false)}>{activePage?.grid.map((row, y) => row.map((raised, x) => <span key={`${x}-${y}`} className={cn("dot", raised && "dot-raised")} />))}</div><div className="mt-2 flex justify-between text-[10px] uppercase text-zinc-500"><span>60 × 40</span><span>{activePage ? dotCount(activePage.grid) : 0} dots</span></div></div><div className="flex flex-col gap-3"><div className="border border-[#111] p-2">{sourceImage ? <img className="aspect-[3/2] w-full object-contain" src={sourceImage} alt="업로드한 원본" /> : <div className="grid aspect-[3/2] place-items-center text-[10px] text-zinc-400">NO SOURCE</div>}</div><div className="grid grid-cols-2 gap-1">{[1, 3].map((size) => <button key={size} onClick={() => setBrushSize(size)} className={cn("archive-choice-button", brushSize === size && "bg-[#2f45ff] text-white")}>{size === 1 ? "1" : "3×3"}</button>)}</div><Button variant="ghost" className="archive-action-button border border-[#111]" onClick={resetActiveGrid}><RotateCcw className="mr-2 h-4 w-4" />CLEAR</Button></div></div><div className="grid border-t border-[#111] md:grid-cols-[1fr_auto]"><div className="grid gap-3 p-3 sm:grid-cols-2"><div><Label htmlFor="page-title" className="archive-label">TITLE</Label><Input id="page-title" className="archive-input mt-1" value={activePage?.title ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ title: event.target.value })} /></div><div><Label htmlFor="alt-text" className="archive-label">ALT</Label><Textarea id="alt-text" className="archive-input mt-1 min-h-10" value={activePage?.altText ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ altText: event.target.value })} /></div></div><div className="flex border-t border-[#111] md:border-l md:border-t-0"><Button variant="ghost" className="archive-action-button border-r border-[#111]" onClick={deleteActivePage}><Trash2 className="mr-2 h-4 w-4" />DELETE</Button><Button variant="ghost" className="archive-action-button" onClick={downloadDtms}><Download className="mr-2 h-4 w-4" />SAVE</Button></div></div></section>
 
-              <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_220px]">
-                <div className="relative overflow-hidden rounded-2xl border border-[#d5e1db] bg-[radial-gradient(circle_at_1px_1px,rgba(23,53,43,.07)_1px,transparent_0)] [background-size:16px_16px] p-3 sm:p-5">
-                  <div role="application" aria-label="60 곱하기 40 촉각 점자 격자. 클릭하여 점을 편집합니다." className="tactile-grid mx-auto aspect-[3/2] w-full max-w-[720px] touch-none select-none rounded-lg bg-[#fbfdfb] p-[2.3%] shadow-inner" onPointerDown={handleGridPointerDown} onPointerMove={handleGridPointerMove} onPointerUp={() => setIsDrawing(false)} onPointerLeave={() => setIsDrawing(false)} onPointerCancel={() => setIsDrawing(false)}>
-                    {activePage?.grid.map((row, y) => row.map((raised, x) => <span key={`${x}-${y}`} className={cn("dot", raised && "dot-raised")} />))}
-                  </div>
-                  <div className="mt-3 flex items-center justify-between text-[11px] font-medium text-slate-500"><span>가로 60점</span><span className="rounded-full bg-white px-2 py-1 shadow-sm">{activePage ? dotCount(activePage.grid) : 0} raised dots</span><span>세로 40점</span></div>
-                </div>
-                <div className="space-y-3">
-                  <div className="rounded-2xl border border-slate-200 bg-[#fbfcfb] p-3">
-                    <p className="mb-2 text-xs font-bold text-slate-700">현재 원본</p>
-                    {sourceImage ? <img className="aspect-[3/2] w-full rounded-lg border border-slate-200 bg-white object-contain" src={sourceImage} alt="업로드한 원본" /> : <div className="grid aspect-[3/2] place-items-center rounded-lg border border-dashed border-slate-300 bg-white px-3 text-center text-[11px] leading-4 text-slate-400">업로드하면 원본이 이곳에 표시됩니다</div>}
-                  </div>
-                  <div className="rounded-2xl bg-[#17352b] p-3 text-white">
-                    <p className="text-xs font-bold">편집 브러시</p>
-                    <div className="mt-3 flex gap-2">{[1, 3].map((size) => <button key={size} onClick={() => setBrushSize(size)} className={cn("grid h-8 flex-1 place-items-center rounded-lg text-xs font-bold transition", brushSize === size ? "bg-[#f4ca68] text-[#17352b]" : "bg-white/10 text-white/80 hover:bg-white/20")}>{size === 1 ? "1점" : "3×3"}</button>)}</div>
-                    <Button variant="ghost" className="mt-3 h-8 w-full rounded-lg text-xs text-white hover:bg-white/10 hover:text-white" onClick={resetActiveGrid}><RotateCcw className="mr-1.5 h-3.5 w-3.5" /> 이 페이지 비우기</Button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="mt-6 grid gap-4 md:grid-cols-2">
-              <div className="rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm">
-                <div className="mb-3 flex items-center gap-2"><FileText className="h-4 w-4 text-[#507366]" /><p className="text-sm font-bold text-slate-800">DTMS 설명</p></div>
-                <Label htmlFor="page-title" className="text-xs font-semibold text-slate-600">페이지 제목</Label>
-                <Input id="page-title" className="mt-1.5 rounded-xl border-slate-200" value={activePage?.title ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ title: event.target.value })} />
-                <Label htmlFor="alt-text" className="mt-4 block text-xs font-semibold text-slate-600">대체 설명</Label>
-                <Textarea id="alt-text" className="mt-1.5 min-h-24 rounded-xl border-slate-200 text-sm" placeholder="이 촉각 도식에 표시한 구조와 위치 관계를 간략히 설명하세요." value={activePage?.altText ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ altText: event.target.value })} />
-              </div>
-              <div className="rounded-[20px] border border-slate-200 bg-white p-5 shadow-sm">
-                <div className="mb-3 flex items-center gap-2"><CircleHelp className="h-4 w-4 text-[#507366]" /><p className="text-sm font-bold text-slate-800">내보내기 전 확인</p></div>
-                <ul className="space-y-2.5 text-xs leading-5 text-slate-600">
-                  <li className="flex gap-2"><Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />전체 → 구조 → 확대 순서가 학습 목적에 맞는지</li>
-                  <li className="flex gap-2"><Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />텍스트·긴 지시선과 미세 잡음을 지웠는지</li>
-                  <li className="flex gap-2"><Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-600" />Dot Canvas에서는 ‘추가’가 아닌 ‘열기’를 사용할지</li>
-                </ul>
-                <div className="mt-4 flex gap-2"><Button variant="outline" className="flex-1 rounded-xl border-slate-200 text-xs" onClick={deleteActivePage}><Trash2 className="mr-1.5 h-3.5 w-3.5" /> 삭제</Button><Button className="flex-1 rounded-xl bg-[#e0a93a] text-[#17352b] hover:bg-[#f1bd51]" onClick={downloadDtms}><Download className="mr-1.5 h-3.5 w-3.5" /> 저장</Button></div>
-              </div>
-            </div>
-          </section>
-
-          <aside className="order-3 space-y-5">
-            <section className="rounded-[22px] border border-slate-200 bg-white p-5 shadow-sm">
-              <div className="mb-4 flex items-center gap-2"><WandSparkles className="h-4 w-4 text-[#b57d16]" /><h2 className="text-sm font-bold text-slate-800">자동 초안 설정</h2></div>
-              <div className="grid grid-cols-2 gap-2 rounded-xl bg-slate-100 p-1"><button className={cn("rounded-lg px-3 py-2 text-xs font-bold transition", mode === "edges" && "bg-white text-[#17352b] shadow-sm")} onClick={() => setMode("edges")}>윤곽 우선</button><button className={cn("rounded-lg px-3 py-2 text-xs font-bold transition", mode === "filled" && "bg-white text-[#17352b] shadow-sm")} onClick={() => setMode("filled")}>면적 우선</button></div>
-              <SettingSlider label="감도" value={threshold} min={60} max={220} onChange={setThreshold} description={mode === "edges" ? "경계·색 변화 감지 수준" : "어두운 영역을 채우는 수준"} />
-              <SettingSlider label="잡음 정리" value={simplification} min={0} max={3} onChange={setSimplification} description="작은 점 군집과 빈틈을 정리합니다" />
-              <div className="mt-5 flex items-center justify-between border-t border-slate-100 pt-4"><div><p className="text-xs font-bold text-slate-700">흑백 반전</p><p className="mt-0.5 text-[11px] text-slate-500">밝은 형태를 점으로 변환</p></div><Switch checked={invert} onCheckedChange={setInvert} /></div>
-              <Button className="mt-5 w-full rounded-xl bg-[#e6b346] text-xs font-bold text-[#17352b] hover:bg-[#f3c85f]" onClick={regenerateAllPages} disabled={!sourceSets.length || isGenerating}>{isGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}{isGenerating ? "3페이지 생성 중" : "3페이지 다시 생성"}</Button>
-            </section>
-
-            <section className="rounded-[22px] border border-dashed border-[#a9c8bb] bg-[#eff6f2] p-5">
-              <input ref={uploadRef} aria-label="이미지 또는 PDF 파일 선택" type="file" accept="image/png,image/jpeg,image/webp,application/pdf" className="pointer-events-none absolute h-px w-px opacity-0" onChange={(event) => handleFile(event.target.files?.[0])} />
-              <input ref={batchUploadRef} aria-label="여러 PDF 파일 대기열 선택" type="file" accept="application/pdf,.pdf" multiple className="pointer-events-none absolute h-px w-px opacity-0" onChange={(event) => { void handlePdfBatch(Array.from(event.target.files ?? [])); event.currentTarget.value = ""; }} />
-              <div className="grid h-10 w-10 place-items-center rounded-xl bg-white text-[#2d7056] shadow-sm"><ImageUp className="h-5 w-5" /></div>
-              <h2 className="mt-3 text-sm font-bold text-[#17352b]">원본 불러오기</h2>
-              <p className="mt-1 text-xs leading-5 text-[#527267]">PNG, JPG, WebP 또는 PDF 전체 페이지에서 3단계 촉각 구조도를 만듭니다. PDF는 텍스트 레이어를 제외하고, 스캔본은 OCR로 문자 영역을 찾습니다.</p>
-              <Button className="mt-4 w-full rounded-xl bg-[#17352b] text-white hover:bg-[#244b3d]" onClick={() => uploadRef.current?.click()} disabled={isLoading}>{isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Upload className="mr-2 h-4 w-4" />}{isLoading ? "분석 중…" : "파일 선택"}</Button>
-              <Button variant="outline" className="mt-2 w-full rounded-xl border-[#9fc3b1] bg-white text-xs text-[#17352b] hover:bg-[#f9fcfa]" onClick={() => batchUploadRef.current?.click()} disabled={isLoading}><Files className="mr-2 h-4 w-4 text-[#2d7056]" />여러 PDF 대기열에 추가</Button>
-              <p className="mt-2 text-[10px] leading-4 text-[#527267]">여러 PDF를 선택하면 파일 순서대로 분석한 뒤, 모든 그림 후보를 하나의 검토 목록에 모읍니다.</p>
-              {lastSavedAt && <Button variant="ghost" className="mt-2 h-8 w-full rounded-lg text-[11px] text-[#527267] hover:bg-white/70 hover:text-[#17352b]" onClick={clearTemporaryDraft}><Trash2 className="mr-1.5 h-3.5 w-3.5" />브라우저 임시 저장 삭제</Button>}
-              <p aria-live="polite" className="mt-3 text-[11px] leading-4 text-[#527267]">{status}</p>
-            </section>
-
-            <section className="rounded-[22px] bg-[#17352b] p-5 text-white shadow-[0_14px_28px_rgba(23,53,43,.16)]">
-              <p className="text-xs font-bold tracking-[0.12em] text-[#f4ca68]">자동화 범위</p>
-              <ol className="mt-3 space-y-3 text-xs leading-5 text-white/80">
-                <li className="flex gap-2"><span className="font-display text-lg leading-5 text-[#f4ca68]">1</span><span>전체 형태는 가장 큰 전경 영역의 외곽선을 추립니다.</span></li>
-                <li className="flex gap-2"><span className="font-display text-lg leading-5 text-[#f4ca68]">2</span><span>구조 구분은 색·명암·윤곽의 변화로 초안을 만듭니다.</span></li>
-                <li className="flex gap-2"><span className="font-display text-lg leading-5 text-[#f4ca68]">3</span><span>핵심 부위는 사용자가 선택하므로 학습 목적을 직접 반영할 수 있습니다.</span></li>
-              </ol>
-            </section>
-          </aside>
+          <aside className="archive-card order-3"><div className="archive-section-heading"><span>SETTINGS</span></div><div className="p-3"><div className="grid grid-cols-2 gap-1"><button className={cn("archive-choice-button", mode === "edges" && "bg-[#111] text-white")} onClick={() => setMode("edges")}>EDGE</button><button className={cn("archive-choice-button", mode === "filled" && "bg-[#111] text-white")} onClick={() => setMode("filled")}>FILL</button></div><SettingSlider label="THRESHOLD" value={threshold} min={60} max={220} onChange={setThreshold} /><SettingSlider label="CLEANUP" value={simplification} min={0} max={3} onChange={setSimplification} /><div className="mt-5 flex items-center justify-between border-t border-[#111] pt-3"><Label htmlFor="invert-switch" className="archive-label">INVERT</Label><Switch id="invert-switch" checked={invert} onCheckedChange={setInvert} /></div><Button variant="ghost" className="archive-action-button mt-5 w-full border border-[#111]" onClick={regenerateAllPages} disabled={!sourceSets.length || isGenerating}>{isGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}REGENERATE</Button>{lastSavedAt && <Button variant="ghost" className="archive-action-button mt-2 w-full" onClick={clearTemporaryDraft}><Trash2 className="mr-2 h-4 w-4" />RESET DRAFT</Button>}<p aria-live="polite" className="sr-only">{status}</p></div></aside>
         </div>
 
-        <section className="mt-7 flex flex-col gap-4 rounded-2xl border border-slate-200 bg-white px-5 py-4 text-xs text-slate-500 shadow-sm sm:flex-row sm:items-center sm:justify-between">
-          <div className="flex items-center gap-2"><FileImage className="h-4 w-4 text-[#507366]" /><span>원본 파일은 서버로 전송되지 않으며, 이 브라우저 탭 안에서만 변환됩니다.</span></div>
-          <a className="inline-flex items-center font-bold text-[#2d7056] hover:text-[#17352b]" href="https://dot.apps-dotincorp.com/canvas" target="_blank" rel="noreferrer">Dot Canvas 열기 <ArrowRight className="ml-1 h-3.5 w-3.5" /></a>
-        </section>
+        <footer className="mt-4 flex items-center justify-between border-t border-[#111] pt-3 text-[10px] uppercase tracking-[.08em] text-zinc-500"><span>local workspace</span><a className="font-medium text-[#111] underline underline-offset-4" href="https://dot.apps-dotincorp.com/canvas" target="_blank" rel="noreferrer">Dot Canvas <ArrowRight className="ml-1 inline h-3 w-3" /></a></footer>
       </main>
     </div>
   );
@@ -1979,6 +1718,6 @@ function MiniGrid({ grid }: { grid: boolean[][] }) {
   return <div className="mini-grid">{grid.map((row, y) => row.map((raised, x) => <span key={`${x}-${y}`} className={raised ? "mini-dot mini-dot-raised" : "mini-dot"} />))}</div>;
 }
 
-function SettingSlider({ label, value, min, max, onChange, description }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void; description: string }) {
-  return <div className="mt-5"><div className="flex items-center justify-between"><p className="text-xs font-bold text-slate-700">{label}</p><span className="rounded-md bg-[#edf4f0] px-1.5 py-0.5 text-[10px] font-bold text-[#315c4d]">{value}</span></div><p className="mt-1 text-[11px] text-slate-500">{description}</p><Slider className="mt-3" min={min} max={max} step={1} value={[value]} onValueChange={([next]) => onChange(next)} /></div>;
+function SettingSlider({ label, value, min, max, onChange, description }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void; description?: string }) {
+  return <div className="mt-5"><div className="flex items-center justify-between"><p className="archive-label">{label}</p><span className="text-[10px] text-zinc-500">{value}</span></div><Slider className="mt-3" min={min} max={max} step={1} value={[value]} onValueChange={([next]) => onChange(next)} /></div>;
 }

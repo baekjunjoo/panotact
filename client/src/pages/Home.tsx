@@ -199,66 +199,108 @@ function outlineForPoint(source: HTMLImageElement, point: { x: number; y: number
   context.drawImage(source, 0, 0, width, height);
   const imageData = context.getImageData(0, 0, width, height);
   const pixels = imageData.data;
-  const startX = clamp(Math.round(point.x * (width - 1)), 0, width - 1);
-  const startY = clamp(Math.round(point.y * (height - 1)), 0, height - 1);
   const colorAt = (x: number, y: number) => {
     const index = (y * width + x) * 4;
     return [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]] as const;
   };
+
+  const edgePixels: Array<readonly number[]> = [];
+  for (let x = 0; x < width; x += 4) { edgePixels.push(colorAt(x, 0), colorAt(x, height - 1)); }
+  for (let y = 0; y < height; y += 4) { edgePixels.push(colorAt(0, y), colorAt(width - 1, y)); }
+  const background = [0, 1, 2].map((channel) => edgePixels.map((color) => color[channel]).sort((left, right) => left - right)[Math.floor(edgePixels.length / 2)]) as [number, number, number];
+  const foreground = new Uint8Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const color = colorAt(x, y);
+      const distance = Math.hypot(color[0] - background[0], color[1] - background[1], color[2] - background[2]);
+      foreground[y * width + x] = Number(color[3] > 20 && distance > 26);
+    }
+  }
+
+  const requestedX = clamp(Math.round(point.x * (width - 1)), 0, width - 1);
+  const requestedY = clamp(Math.round(point.y * (height - 1)), 0, height - 1);
+  let start = requestedY * width + requestedX;
+  if (!foreground[start]) {
+    let nearest = -1;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    for (let y = Math.max(0, requestedY - 42); y <= Math.min(height - 1, requestedY + 42); y += 1) {
+      for (let x = Math.max(0, requestedX - 42); x <= Math.min(width - 1, requestedX + 42); x += 1) {
+        const index = y * width + x;
+        const distance = (x - requestedX) ** 2 + (y - requestedY) ** 2;
+        if (foreground[index] && distance < nearestDistance) { nearest = index; nearestDistance = distance; }
+      }
+    }
+    if (nearest < 0) return null;
+    start = nearest;
+  }
+
   const visited = new Uint8Array(width * height);
   const contains = new Uint8Array(width * height);
-  const queue: number[] = [startY * width + startX];
-  visited[queue[0]] = 1;
-  const tolerance = 54;
-  const maxPixels = Math.floor(width * height * 0.55);
+  const queue: number[] = [start];
+  visited[start] = 1;
+  const maxPixels = Math.floor(width * height * 0.72);
   let count = 0;
-  let minX = startX;
-  let maxX = startX;
-  let minY = startY;
-  let maxY = startY;
+  let minX = width;
+  let maxX = 0;
+  let minY = height;
+  let maxY = 0;
 
   for (let queueIndex = 0; queueIndex < queue.length && count < maxPixels; queueIndex += 1) {
     const current = queue[queueIndex];
     const x = current % width;
     const y = Math.floor(current / width);
-    const color = colorAt(x, y);
     contains[current] = 1;
     count += 1;
     minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
-    [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]].forEach(([nextX, nextY]) => {
+    [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1], [x + 1, y + 1], [x + 1, y - 1], [x - 1, y + 1], [x - 1, y - 1]].forEach(([nextX, nextY]) => {
       if (nextX < 0 || nextY < 0 || nextX >= width || nextY >= height) return;
       const next = nextY * width + nextX;
-      const nextColor = colorAt(nextX, nextY);
-      if (!visited[next] && nextColor[3] >= 20 && colorDistance(nextColor, color) <= tolerance && Math.abs(luminance(nextColor) - luminance(color)) <= 42) { visited[next] = 1; queue.push(next); }
+      if (!visited[next] && foreground[next]) { visited[next] = 1; queue.push(next); }
     });
   }
 
-  if (count < 20 || count >= maxPixels) return null;
-  const leftBoundary: Array<[number, number]> = [];
-  const rightBoundary: Array<[number, number]> = [];
-  for (let y = minY; y <= maxY; y += 2) {
-    let left = width;
-    let right = -1;
-    for (let x = minX; x <= maxX; x += 2) {
-      const index = y * width + x;
-      if (contains[index]) { left = Math.min(left, x); right = Math.max(right, x); }
+  if (count < 20 || count >= maxPixels || minX === width || minY === height) return null;
+  type Edge = { from: [number, number]; to: [number, number] };
+  const edges: Edge[] = [];
+  const occupied = (x: number, y: number) => x >= 0 && y >= 0 && x < width && y < height && contains[y * width + x] === 1;
+  for (let y = minY; y <= maxY; y += 1) {
+    for (let x = minX; x <= maxX; x += 1) {
+      if (!occupied(x, y)) continue;
+      if (!occupied(x, y - 1)) edges.push({ from: [x, y], to: [x + 1, y] });
+      if (!occupied(x + 1, y)) edges.push({ from: [x + 1, y], to: [x + 1, y + 1] });
+      if (!occupied(x, y + 1)) edges.push({ from: [x + 1, y + 1], to: [x, y + 1] });
+      if (!occupied(x - 1, y)) edges.push({ from: [x, y + 1], to: [x, y] });
     }
-    if (right >= left) { leftBoundary.push([left / width, y / height]); rightBoundary.push([right / width, y / height]); }
   }
-  const boundary = [...leftBoundary, ...rightBoundary.reverse()];
+  const edgeKey = ([x, y]: [number, number]) => `${x}:${y}`;
+  const edgesByStart = new Map<string, number[]>();
+  edges.forEach((edge, index) => edgesByStart.set(edgeKey(edge.from), [...(edgesByStart.get(edgeKey(edge.from)) ?? []), index]));
+  const used = new Uint8Array(edges.length);
+  let longestLoop: Array<[number, number]> = [];
+  for (let index = 0; index < edges.length; index += 1) {
+    if (used[index]) continue;
+    const loop: Array<[number, number]> = [];
+    let current = index;
+    const startEdge = edges[index].from;
+    while (!used[current]) {
+      used[current] = 1;
+      const edge = edges[current];
+      loop.push(edge.from);
+      const next = (edgesByStart.get(edgeKey(edge.to)) ?? []).find((candidate) => !used[candidate]);
+      if (next === undefined) {
+        if (edgeKey(edge.to) === edgeKey(startEdge)) loop.push(edge.to);
+        break;
+      }
+      current = next;
+    }
+    if (loop.length > longestLoop.length) longestLoop = loop;
+  }
+  const boundary = longestLoop.filter((_, index) => index % 3 === 0).map(([x, y]) => [x / width, y / height] as [number, number]);
   if (boundary.length < 8) return null;
-  const padX = Math.max(0.025, ((maxX - minX) / width) * 0.08);
-  const padY = Math.max(0.025, ((maxY - minY) / height) * 0.08);
+  const padX = Math.max(0.008, ((maxX - minX) / width) * 0.025);
+  const padY = Math.max(0.008, ((maxY - minY) / height) * 0.025);
   const crop = constrainCrop({ x: minX / width - padX, y: minY / height - padY, width: (maxX - minX + 1) / width + padX * 2, height: (maxY - minY + 1) / height + padY * 2, rotation: 0 });
   return { points: boundary, crop };
-}
-
-function outlineFromCrop(crop: Crop): FocusOutline {
-  const points = Array.from({ length: 24 }, (_, index) => {
-    const angle = (index / 24) * Math.PI * 2;
-    return [crop.x + crop.width / 2 + Math.cos(angle) * crop.width / 2, crop.y + crop.height / 2 + Math.sin(angle) * crop.height / 2] as [number, number];
-  });
-  return { points, crop };
 }
 
 function copySourceSet(sourceSet: SourceSet): SourceSet {
@@ -1635,8 +1677,9 @@ function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; o
   function choosePosition(event: React.PointerEvent<HTMLDivElement>) {
     const selected = point(event);
     const selectedOutline = imageRef.current ? outlineForPoint(imageRef.current, selected) : null;
-    const nextCrop = selectedOutline?.crop ?? cropFromCenter(selected.x, selected.y, 0.5, sourceAspect);
-    setOutline(selectedOutline ?? outlineFromCrop(nextCrop));
+    if (!selectedOutline) return;
+    const nextCrop = selectedOutline.crop;
+    setOutline(selectedOutline);
     setSelectionId((current) => current + 1);
     onCommit(nextCrop);
   }

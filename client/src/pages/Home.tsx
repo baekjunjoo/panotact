@@ -58,6 +58,7 @@ const imageLoadCache = new Map<string, Promise<HTMLImageElement>>();
 type ConversionMode = "edges" | "filled";
 type PageKind = "overall" | "structure" | "focus" | "manual";
 type Crop = { x: number; y: number; width: number; height: number; rotation: number };
+type FocusOutline = { points: Array<[number, number]>; crop: Crop };
 type FocusCandidate = { id: string; label: string; crop: Crop; score: number };
 type SourceInput = { source: string; label: string; documentId?: string; documentName?: string; documentOrder?: number; candidateOrder?: number; pdfPageNumber?: number; candidateIds?: string[] };
 type TextRegion = { x: number; y: number; width: number; height: number };
@@ -183,6 +184,73 @@ function constrainCrop(crop: Crop): Crop {
     height,
     rotation: clamp(crop.rotation, -180, 180),
   };
+}
+
+function outlineForPoint(source: HTMLImageElement, point: { x: number; y: number }): FocusOutline | null {
+  const longestSide = 480;
+  const scale = Math.min(1, longestSide / Math.max(source.naturalWidth, source.naturalHeight));
+  const width = Math.max(1, Math.round(source.naturalWidth * scale));
+  const height = Math.max(1, Math.round(source.naturalHeight * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return null;
+  context.drawImage(source, 0, 0, width, height);
+  const imageData = context.getImageData(0, 0, width, height);
+  const pixels = imageData.data;
+  const startX = clamp(Math.round(point.x * (width - 1)), 0, width - 1);
+  const startY = clamp(Math.round(point.y * (height - 1)), 0, height - 1);
+  const colorAt = (x: number, y: number) => {
+    const index = (y * width + x) * 4;
+    return [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]] as const;
+  };
+  const visited = new Uint8Array(width * height);
+  const contains = new Uint8Array(width * height);
+  const queue: number[] = [startY * width + startX];
+  visited[queue[0]] = 1;
+  const tolerance = 54;
+  const maxPixels = Math.floor(width * height * 0.55);
+  let count = 0;
+  let minX = startX;
+  let maxX = startX;
+  let minY = startY;
+  let maxY = startY;
+
+  for (let queueIndex = 0; queueIndex < queue.length && count < maxPixels; queueIndex += 1) {
+    const current = queue[queueIndex];
+    const x = current % width;
+    const y = Math.floor(current / width);
+    const color = colorAt(x, y);
+    contains[current] = 1;
+    count += 1;
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+    [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]].forEach(([nextX, nextY]) => {
+      if (nextX < 0 || nextY < 0 || nextX >= width || nextY >= height) return;
+      const next = nextY * width + nextX;
+      const nextColor = colorAt(nextX, nextY);
+      if (!visited[next] && nextColor[3] >= 20 && colorDistance(nextColor, color) <= tolerance && Math.abs(luminance(nextColor) - luminance(color)) <= 42) { visited[next] = 1; queue.push(next); }
+    });
+  }
+
+  if (count < 20 || count >= maxPixels) return null;
+  const leftBoundary: Array<[number, number]> = [];
+  const rightBoundary: Array<[number, number]> = [];
+  for (let y = minY; y <= maxY; y += 2) {
+    let left = width;
+    let right = -1;
+    for (let x = minX; x <= maxX; x += 2) {
+      const index = y * width + x;
+      if (contains[index]) { left = Math.min(left, x); right = Math.max(right, x); }
+    }
+    if (right >= left) { leftBoundary.push([left / width, y / height]); rightBoundary.push([right / width, y / height]); }
+  }
+  const boundary = [...leftBoundary, ...rightBoundary.reverse()];
+  if (boundary.length < 8) return null;
+  const padX = Math.max(0.025, ((maxX - minX) / width) * 0.08);
+  const padY = Math.max(0.025, ((maxY - minY) / height) * 0.08);
+  const crop = constrainCrop({ x: minX / width - padX, y: minY / height - padY, width: (maxX - minX + 1) / width + padX * 2, height: (maxY - minY + 1) / height + padY * 2, rotation: 0 });
+  return { points: boundary, crop };
 }
 
 function copySourceSet(sourceSet: SourceSet): SourceSet {
@@ -612,8 +680,6 @@ export default function Home() {
   const undoStackRef = useRef<WorkspaceSnapshot[]>([]);
   const redoStackRef = useRef<WorkspaceSnapshot[]>([]);
   const focusRenderRef = useRef(0);
-  const focusPreviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const focusPreviewCropRef = useRef<Crop | null>(null);
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activePage = useMemo(
@@ -873,19 +939,6 @@ export default function Home() {
   function selectFocusCanvas(sourceSet: SourceSet) {
     const focusPage = pages.find((page) => page.sourceKey === sourceSet.id && page.kind === "focus");
     if (focusPage) setSelectedId(focusPage.id);
-  }
-
-  function previewFocusCrop(crop: Crop) {
-    if (!activeSourceSet) return;
-    const previewSet = { ...activeSourceSet, selectedCrop: constrainCrop(crop) };
-    focusPreviewCropRef.current = previewSet.selectedCrop;
-    selectFocusCanvas(previewSet);
-    if (focusPreviewTimerRef.current) return;
-    focusPreviewTimerRef.current = setTimeout(() => {
-      focusPreviewTimerRef.current = null;
-      const latestCrop = focusPreviewCropRef.current;
-      if (latestCrop) void refreshFocusPage({ ...previewSet, selectedCrop: latestCrop }, false);
-    }, 48);
   }
 
   async function createSourceSet(input: SourceInput): Promise<SourceSet> {
@@ -1436,11 +1489,6 @@ export default function Home() {
     void refreshFocusPage(updatedSet);
   }
 
-  function selectFocusAt(centerX: number, centerY: number) {
-    if (!activeSourceSet) return;
-    selectFocusCrop(cropFromCenter(centerX, centerY, activeSourceSet.selectedCrop.width, activeSourceSet.aspect, activeSourceSet.selectedCrop.rotation));
-  }
-
   function downloadDtms() {
     const payload = {
       title: fileTitle.trim() || "나의 촉각 도식",
@@ -1537,7 +1585,7 @@ export default function Home() {
 
         {learningFlow.length > 0 && <section className="archive-card mb-4"><div className="archive-section-heading"><span>FLOW</span><span>{learningFlow.length}</span></div><div className="grid divide-y divide-[#111] md:grid-cols-2 md:divide-x md:divide-y-0 xl:grid-cols-4">{learningFlow.slice().sort((left, right) => left.documentOrder - right.documentOrder || left.candidateOrder - right.candidateOrder).map((entry, index) => { const tactilePages = entry.pageIds.map((pageId) => pages.find((page) => page.id === pageId)).filter((page): page is TactilePage => Boolean(page)); return <article key={entry.id} className="p-3"><div className="flex items-center justify-between text-[10px] text-zinc-500"><span>{String(index + 1).padStart(2, "0")}</span><span>{entry.documentName} · {entry.pageNumber}</span></div><img src={entry.source} alt={`${entry.documentName} ${entry.pageNumber}쪽에서 선택한 그림`} className="mt-2 aspect-[4/3] w-full border border-[#111] object-contain" /><Textarea aria-label={`${entry.label} 그림 설명`} id={`flow-description-${entry.id}`} className="mt-2 min-h-16 border-[#111] bg-transparent text-xs" value={entry.description} onFocus={recordHistory} onChange={(event) => updateLearningDescription(entry.id, event.target.value)} /><div className="mt-2 flex gap-1">{tactilePages.map((page) => <button key={page.id} title={pageInfo(page.kind).title} aria-label={`${entry.label} ${pageInfo(page.kind).title} 열기`} onClick={() => { setSelectedId(page.id); setStatus(`${entry.documentName} ${entry.pageNumber}쪽과 연결된 ${pageInfo(page.kind).title} 페이지를 열었습니다.`); }} className={cn("archive-page-dot", page.id === selectedId && "bg-[#2f45ff] text-white")}>{pageInfo(page.kind).title.slice(0, 1)}</button>)}<Button variant="ghost" size="sm" className="archive-open-button ml-auto" onClick={() => openLearningEntry(entry)} aria-label={`${entry.label} 학습 단위 열기`}><ArrowRight className="h-4 w-4" /></Button></div></article>; })}</div></section>}
 
-        {activeSourceSet && <section className="archive-card mb-4"><div className="archive-section-heading"><span>FOCUS</span><span className="truncate">{activeSourceSet.label}</span></div><div className="p-3"><FocusPicker source={activeSourceSet.source} crop={activeSourceSet.selectedCrop} onSelectCenter={selectFocusAt} onPreview={previewFocusCrop} onCommit={selectFocusCrop} /></div></section>}
+        {activeSourceSet && <section className="archive-card mb-4"><div className="archive-section-heading"><span>FOCUS</span><span className="truncate">{activeSourceSet.label}</span></div><div className="p-3"><FocusPicker source={activeSourceSet.source} crop={activeSourceSet.selectedCrop} onCommit={selectFocusCrop} /></div></section>}
 
         <div className="grid gap-4 xl:grid-cols-[260px_minmax(0,1fr)_280px]">
           <aside className="archive-card order-2 xl:order-1"><div className="archive-section-heading"><span>PAGES</span><span>{pages.length}</span></div><div className="divide-y divide-[#111]">{pages.map((page, index) => <button key={page.id} className={cn("flex w-full items-center gap-2 p-2 text-left transition hover:bg-[#f1f1f1]", page.id === selectedId && "bg-[#dfe5ff]")} onClick={() => setSelectedId(page.id)}><div className="grid h-10 w-14 shrink-0 place-items-center border border-[#111] bg-white"><MiniGrid grid={page.grid} /></div><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{page.title || `PAGE ${index + 1}`}</span><span className="text-[10px] text-zinc-500">{dotCount(page.grid)} dots</span></span></button>)}</div><div className="grid grid-cols-2 border-t border-[#111]"><Button variant="ghost" className="archive-action-button border-r border-[#111]" onClick={addBlankPage}><FilePlus2 className="mr-2 h-4 w-4" />NEW</Button><Button variant="ghost" className="archive-action-button" onClick={duplicatePage}><Layers3 className="mr-2 h-4 w-4" />COPY</Button></div></aside>
@@ -1553,26 +1601,18 @@ export default function Home() {
   );
 }
 
-function FocusPicker({ source, crop, onSelectCenter, onPreview, onCommit }: { source: string; crop: Crop; onSelectCenter: (x: number, y: number) => void; onPreview: (crop: Crop) => void; onCommit: (crop: Crop) => void }) {
-  type CropInteraction = { type: "move" | "resize" | "rotate"; handle?: "nw" | "ne" | "se" | "sw"; startX: number; startY: number; origin: Crop };
+function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; onCommit: (crop: Crop) => void }) {
   const pickerRef = useRef<HTMLDivElement>(null);
-  const [draft, setDraft] = useState(crop);
-  const draftRef = useRef(crop);
-  const interactionRef = useRef<CropInteraction | null>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
+  const [outline, setOutline] = useState<FocusOutline | null>(null);
   const [sourceAspect, setSourceAspect] = useState(FOCUS_FRAME_RATIO);
   const imageFrame = useMemo(() => containedImageFrame(sourceAspect, FOCUS_FRAME_RATIO), [sourceAspect]);
 
   useEffect(() => {
-    draftRef.current = crop;
-    setDraft(crop);
-  }, [crop]);
-
-  function updateDraft(next: Crop) {
-    const constrained = constrainCrop(next);
-    draftRef.current = constrained;
-    setDraft(constrained);
-    onPreview(constrained);
-  }
+    setOutline(null);
+    const image = imageRef.current;
+    if (image?.complete && image.naturalWidth) inspectImage({ currentTarget: image } as React.SyntheticEvent<HTMLImageElement>);
+  }, [source]);
 
   function point(event: React.PointerEvent<HTMLElement>) {
     const bounds = pickerRef.current?.getBoundingClientRect();
@@ -1586,78 +1626,30 @@ function FocusPicker({ source, crop, onSelectCenter, onPreview, onCommit }: { so
   }
 
   function choosePosition(event: React.PointerEvent<HTMLDivElement>) {
-    if (interactionRef.current) return;
     const selected = point(event);
-    onSelectCenter(selected.x, selected.y);
+    const selectedOutline = imageRef.current ? outlineForPoint(imageRef.current, selected) : null;
+    const nextCrop = selectedOutline?.crop ?? cropFromCenter(selected.x, selected.y, 0.5, sourceAspect);
+    setOutline(selectedOutline);
+    onCommit(nextCrop);
   }
 
-  function beginInteraction(event: React.PointerEvent<HTMLElement>, type: "move" | "resize" | "rotate", handle?: "nw" | "ne" | "se" | "sw") {
-    event.preventDefault();
-    event.stopPropagation();
-    const start = point(event);
-    interactionRef.current = { type, handle, startX: start.x, startY: start.y, origin: draftRef.current };
-    onPreview(draftRef.current);
-    try {
-      event.currentTarget.setPointerCapture(event.pointerId);
-    } catch {
-      // Pointer capture is unavailable for synthetic events; the picker still tracks the drag.
-    }
+  function inspectImage(event: React.SyntheticEvent<HTMLImageElement>) {
+    const image = event.currentTarget;
+    const aspect = image.naturalWidth / image.naturalHeight;
+    setSourceAspect(aspect);
+    const current = cropCenter(crop);
+    setOutline(outlineForPoint(image, current));
   }
 
-  function updateInteraction(event: React.PointerEvent<HTMLDivElement>) {
-    const interaction = interactionRef.current;
-    if (!interaction) return;
-    const current = point(event);
-    const deltaX = current.x - interaction.startX;
-    const deltaY = current.y - interaction.startY;
-    let next = interaction.origin;
-
-    if (interaction.type === "move") {
-      next = { ...interaction.origin, x: interaction.origin.x + deltaX, y: interaction.origin.y + deltaY };
-    }
-    if (interaction.type === "resize") {
-      const { origin, handle } = interaction;
-      if (handle === "nw") next = { ...origin, x: origin.x + deltaX, y: origin.y + deltaY, width: origin.width - deltaX, height: origin.height - deltaY };
-      if (handle === "ne") next = { ...origin, y: origin.y + deltaY, width: origin.width + deltaX, height: origin.height - deltaY };
-      if (handle === "se") next = { ...origin, width: origin.width + deltaX, height: origin.height + deltaY };
-      if (handle === "sw") next = { ...origin, x: origin.x + deltaX, width: origin.width - deltaX, height: origin.height + deltaY };
-    }
-    if (interaction.type === "rotate") {
-      const center = cropCenter(interaction.origin);
-      let degrees = (Math.atan2(current.y - center.y, current.x - center.x) * 180) / Math.PI + 90;
-      if (degrees > 180) degrees -= 360;
-      next = { ...interaction.origin, rotation: Math.round(degrees / 5) * 5 };
-    }
-    updateDraft(next);
-  }
-
-  function endInteraction() {
-    if (!interactionRef.current) return;
-    interactionRef.current = null;
-    onCommit(draftRef.current);
-  }
-
-  const handles = [
-    ["nw", "left-0 top-0 -translate-x-1/2 -translate-y-1/2 cursor-nwse-resize"],
-    ["ne", "right-0 top-0 translate-x-1/2 -translate-y-1/2 cursor-nesw-resize"],
-    ["se", "bottom-0 right-0 translate-x-1/2 translate-y-1/2 cursor-nwse-resize"],
-    ["sw", "bottom-0 left-0 -translate-x-1/2 translate-y-1/2 cursor-nesw-resize"],
-  ] as const;
+  const points = outline?.points.map(([x, y]) => `${(imageFrame.x + x * imageFrame.width) * 100},${(imageFrame.y + y * imageFrame.height) * 100}`).join(" ") ?? "";
 
   return (
     <div className="focus-workspace">
-      <div ref={pickerRef} role="button" tabIndex={0} aria-label="원본 이미지에서 핵심 부위 선택. 확대 영역은 이동, 모서리 조절, 회전이 가능합니다." className="focus-picker focus-frame relative cursor-crosshair overflow-hidden" onPointerDown={choosePosition} onPointerMove={updateInteraction} onPointerUp={endInteraction} onPointerCancel={endInteraction} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelectCenter(0.5, 0.5); }}>
+      <div ref={pickerRef} role="button" tabIndex={0} aria-label="원본에서 확대할 대상을 클릭하면 대상의 외곽선이 선택되고 촉각 캔버스가 갱신됩니다." className="focus-picker focus-frame relative cursor-crosshair overflow-hidden" onPointerDown={choosePosition} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") choosePosition({ currentTarget: event.currentTarget, clientX: event.currentTarget.getBoundingClientRect().left + event.currentTarget.getBoundingClientRect().width / 2, clientY: event.currentTarget.getBoundingClientRect().top + event.currentTarget.getBoundingClientRect().height / 2 } as React.PointerEvent<HTMLDivElement>); }}>
         <div className="absolute overflow-hidden bg-white" style={{ left: `${imageFrame.x * 100}%`, top: `${imageFrame.y * 100}%`, width: `${imageFrame.width * 100}%`, height: `${imageFrame.height * 100}%` }}>
-          <img className="h-full w-full select-none object-contain" src={source} alt="핵심 부위 선택용 원본 이미지" draggable={false} onLoad={(event) => setSourceAspect(event.currentTarget.naturalWidth / event.currentTarget.naturalHeight)} />
+          <img ref={imageRef} className="h-full w-full select-none object-contain" src={source} alt="핵심 부위 선택용 원본 이미지" draggable={false} onLoad={inspectImage} />
         </div>
-        <div className="focus-crop absolute border" style={{ left: `${(imageFrame.x + draft.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + draft.y * imageFrame.height) * 100}%`, width: `${draft.width * imageFrame.width * 100}%`, height: `${draft.height * imageFrame.height * 100}%`, transform: `rotate(${draft.rotation}deg)`, transformOrigin: "center" }}>
-          <button type="button" aria-label="확대 영역 이동" className="absolute inset-0 cursor-move" onPointerDown={(event) => beginInteraction(event, "move")} />
-          <span className="focus-crop-label pointer-events-none absolute -top-6 left-0 whitespace-nowrap px-1.5 py-1 text-[9px] font-medium text-white">FOCUS</span>
-          <span className="pointer-events-none absolute left-1/2 top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 border border-white bg-[#333]/80"><span className="absolute left-1/2 top-0 h-full border-l border-white/80" /><span className="absolute left-0 top-1/2 w-full border-t border-white/80" /></span>
-          {handles.map(([handle, position]) => <button key={handle} type="button" aria-label={`확대 영역 ${handle} 모서리 크기 조절`} className={cn("focus-crop-handle absolute z-10 h-3.5 w-3.5 border bg-white", position)} onPointerDown={(event) => beginInteraction(event, "resize", handle)} />)}
-          <span className="pointer-events-none absolute left-1/2 -top-7 h-6 border-l border-[#444]" />
-          <button type="button" aria-label="확대 영역 회전" className="focus-crop-rotate absolute left-1/2 -top-10 z-10 h-5 w-5 -translate-x-1/2 border bg-white cursor-grab active:cursor-grabbing" onPointerDown={(event) => beginInteraction(event, "rotate")} />
-        </div>
+        {outline && <><svg className="pointer-events-none absolute inset-0 z-10 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon className="focus-object-outline" points={points} /></svg><span className="focus-object-label pointer-events-none absolute z-20 px-1.5 py-1 text-[9px] font-medium text-white" style={{ left: `${(imageFrame.x + outline.crop.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + outline.crop.y * imageFrame.height) * 100}%` }}>FOCUS</span></>}
       </div>
     </div>
   );

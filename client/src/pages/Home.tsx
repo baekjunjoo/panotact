@@ -1619,8 +1619,6 @@ function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; o
 
   useEffect(() => {
     setOutline(null);
-    const image = imageRef.current;
-    if (image?.complete && image.naturalWidth) inspectImage({ currentTarget: image } as React.SyntheticEvent<HTMLImageElement>);
   }, [source]);
 
   function point(event: React.PointerEvent<HTMLElement>) {
@@ -1645,10 +1643,7 @@ function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; o
 
   function inspectImage(event: React.SyntheticEvent<HTMLImageElement>) {
     const image = event.currentTarget;
-    const aspect = image.naturalWidth / image.naturalHeight;
-    setSourceAspect(aspect);
-    const current = cropCenter(crop);
-    setOutline(outlineForPoint(image, current) ?? outlineFromCrop(crop));
+    setSourceAspect(image.naturalWidth / image.naturalHeight);
   }
 
   const points = outline?.points.map(([x, y]) => `${(imageFrame.x + x * imageFrame.width) * 100},${(imageFrame.y + y * imageFrame.height) * 100}`).join(" ") ?? "";
@@ -1659,7 +1654,7 @@ function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; o
         <div className="absolute overflow-hidden bg-white" style={{ left: `${imageFrame.x * 100}%`, top: `${imageFrame.y * 100}%`, width: `${imageFrame.width * 100}%`, height: `${imageFrame.height * 100}%` }}>
           <img ref={imageRef} className="h-full w-full select-none object-contain" src={source} alt="핵심 부위 선택용 원본 이미지" draggable={false} onLoad={inspectImage} />
         </div>
-        {outline && <><svg key={selectionId} className="pointer-events-none absolute inset-0 z-10 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon className="focus-object-outline" points={points} /></svg><span key={`label-${selectionId}`} className="focus-object-label pointer-events-none absolute z-20 px-1.5 py-1 text-[9px] font-medium text-white" style={{ left: `${(imageFrame.x + outline.crop.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + outline.crop.y * imageFrame.height) * 100}%` }}>FOCUS</span></>}
+        {outline && <><svg key={selectionId} className="pointer-events-none absolute inset-0 z-10 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon className="focus-object-outline" points={points} /></svg><span key={`label-${selectionId}`} className="focus-object-label pointer-events-none absolute z-20 px-1.5 py-1 text-[9px] font-medium text-[#333]" style={{ left: `${(imageFrame.x + outline.crop.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + outline.crop.y * imageFrame.height) * 100}%` }}>FOCUS</span></>}
       </div>
     </div>
   );

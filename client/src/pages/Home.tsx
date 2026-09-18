@@ -253,6 +253,14 @@ function outlineForPoint(source: HTMLImageElement, point: { x: number; y: number
   return { points: boundary, crop };
 }
 
+function outlineFromCrop(crop: Crop): FocusOutline {
+  const points = Array.from({ length: 24 }, (_, index) => {
+    const angle = (index / 24) * Math.PI * 2;
+    return [crop.x + crop.width / 2 + Math.cos(angle) * crop.width / 2, crop.y + crop.height / 2 + Math.sin(angle) * crop.height / 2] as [number, number];
+  });
+  return { points, crop };
+}
+
 function copySourceSet(sourceSet: SourceSet): SourceSet {
   return {
     ...sourceSet,
@@ -1605,6 +1613,7 @@ function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; o
   const pickerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const [outline, setOutline] = useState<FocusOutline | null>(null);
+  const [selectionId, setSelectionId] = useState(0);
   const [sourceAspect, setSourceAspect] = useState(FOCUS_FRAME_RATIO);
   const imageFrame = useMemo(() => containedImageFrame(sourceAspect, FOCUS_FRAME_RATIO), [sourceAspect]);
 
@@ -1629,7 +1638,8 @@ function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; o
     const selected = point(event);
     const selectedOutline = imageRef.current ? outlineForPoint(imageRef.current, selected) : null;
     const nextCrop = selectedOutline?.crop ?? cropFromCenter(selected.x, selected.y, 0.5, sourceAspect);
-    setOutline(selectedOutline);
+    setOutline(selectedOutline ?? outlineFromCrop(nextCrop));
+    setSelectionId((current) => current + 1);
     onCommit(nextCrop);
   }
 
@@ -1638,7 +1648,7 @@ function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; o
     const aspect = image.naturalWidth / image.naturalHeight;
     setSourceAspect(aspect);
     const current = cropCenter(crop);
-    setOutline(outlineForPoint(image, current));
+    setOutline(outlineForPoint(image, current) ?? outlineFromCrop(crop));
   }
 
   const points = outline?.points.map(([x, y]) => `${(imageFrame.x + x * imageFrame.width) * 100},${(imageFrame.y + y * imageFrame.height) * 100}`).join(" ") ?? "";
@@ -1649,7 +1659,7 @@ function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; o
         <div className="absolute overflow-hidden bg-white" style={{ left: `${imageFrame.x * 100}%`, top: `${imageFrame.y * 100}%`, width: `${imageFrame.width * 100}%`, height: `${imageFrame.height * 100}%` }}>
           <img ref={imageRef} className="h-full w-full select-none object-contain" src={source} alt="핵심 부위 선택용 원본 이미지" draggable={false} onLoad={inspectImage} />
         </div>
-        {outline && <><svg className="pointer-events-none absolute inset-0 z-10 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon className="focus-object-outline" points={points} /></svg><span className="focus-object-label pointer-events-none absolute z-20 px-1.5 py-1 text-[9px] font-medium text-white" style={{ left: `${(imageFrame.x + outline.crop.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + outline.crop.y * imageFrame.height) * 100}%` }}>FOCUS</span></>}
+        {outline && <><svg key={selectionId} className="pointer-events-none absolute inset-0 z-10 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon className="focus-object-outline" points={points} /></svg><span key={`label-${selectionId}`} className="focus-object-label pointer-events-none absolute z-20 px-1.5 py-1 text-[9px] font-medium text-white" style={{ left: `${(imageFrame.x + outline.crop.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + outline.crop.y * imageFrame.height) * 100}%` }}>FOCUS</span></>}
       </div>
     </div>
   );

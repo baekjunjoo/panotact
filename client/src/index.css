@@ -106,10 +106,11 @@
 .mini-dot-raised { background: #777; border-radius: 999px; }
 .focus-workspace { min-width: 0; }
 .focus-picker { border: 1px solid #dedede; border-radius: 0; box-shadow: none; }
+.focus-picker:focus-visible { outline: 0; box-shadow: inset 0 0 0 2px #4d5acb; }
 .focus-frame { aspect-ratio: 16 / 9; background-color: #f6f6f6; background-image: linear-gradient(45deg, #f1f1f1 25%, transparent 25%), linear-gradient(-45deg, #f1f1f1 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #f1f1f1 75%), linear-gradient(-45deg, transparent 75%, #f1f1f1 75%); background-position: 0 0, 0 6px, 6px -6px, -6px 0; background-size: 12px 12px; }
 .focus-crop, .candidate-crop { border-color: #3f3f3f; background: rgb(255 255 255 / 8%); box-shadow: 0 0 0 9999px rgb(0 0 0 / 25%); }
-.focus-object-outline { fill: rgb(255 255 255 / 10%); stroke: #242424; stroke-width: .45; stroke-linejoin: round; vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 1px rgb(255 255 255 / 90%)); }
-.focus-object-label { background: #383838; transform: translateY(-100%); font-family: "IBM Plex Mono", monospace; letter-spacing: .06em; }
+.focus-object-outline { fill: rgb(77 90 203 / 8%); stroke: #4d5acb; stroke-width: .35; stroke-dasharray: 1.1 1.25; stroke-linejoin: round; vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 1px rgb(255 255 255 / 90%)); animation: focus-outline-in 220ms cubic-bezier(.23, 1, .32, 1) both; }
+.focus-object-label { background: #4d5acb; transform: translateY(-100%); font-family: "IBM Plex Mono", monospace; letter-spacing: .08em; animation: focus-label-in 180ms cubic-bezier(.23, 1, .32, 1) both; }
 .focus-crop-label, .archive-float-label { background: #383838; font-family: "IBM Plex Mono", monospace; font-size: 9px; letter-spacing: .06em; }
 .focus-crop-handle { border-color: #3f3f3f; box-shadow: 0 0 0 1px rgb(255 255 255 / 75%); }
 .focus-crop-rotate { border-color: #3f3f3f; box-shadow: 0 0 0 1px rgb(255 255 255 / 75%); }
@@ -132,4 +133,6 @@
 }
 @keyframes button-spin { to { transform: rotate(360deg); } }
 @keyframes button-shake { 20%, 60% { transform: translateX(-2px); } 40%, 80% { transform: translateX(2px); } }
+@keyframes focus-outline-in { from { opacity: 0; fill-opacity: 0; } to { opacity: 1; fill-opacity: 1; } }
+@keyframes focus-label-in { from { opacity: 0; transform: translateY(-80%); } to { opacity: 1; transform: translateY(-100%); } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; } }

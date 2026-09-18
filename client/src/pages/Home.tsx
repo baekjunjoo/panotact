@@ -50,6 +50,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
 const GRID_WIDTH = 60;
 const GRID_HEIGHT = 40;
 const GRID_RATIO = GRID_WIDTH / GRID_HEIGHT;
+const FOCUS_FRAME_RATIO = 16 / 9;
+const CANDIDATE_FRAME_RATIO = 4 / 3;
 const FULL_CROP = { x: 0, y: 0, width: 1, height: 1, rotation: 0 };
 const EMPTY_GRID = () => Array.from({ length: GRID_HEIGHT }, () => Array(GRID_WIDTH).fill(false));
 
@@ -137,6 +139,16 @@ function dotCount(grid: boolean[][]) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function containedImageFrame(sourceAspect: number, frameAspect: number) {
+  const aspect = Number.isFinite(sourceAspect) && sourceAspect > 0 ? sourceAspect : frameAspect;
+  if (aspect >= frameAspect) {
+    const height = frameAspect / aspect;
+    return { x: 0, y: (1 - height) / 2, width: 1, height };
+  }
+  const width = aspect / frameAspect;
+  return { x: (1 - width) / 2, y: 0, width, height: 1 };
 }
 
 function cropFromCenter(centerX: number, centerY: number, width: number, sourceAspect: number, rotation = 0): Crop {
@@ -1537,6 +1549,8 @@ function FocusPicker({ source, crop, onSelectCenter, onCommit }: { source: strin
   const [draft, setDraft] = useState(crop);
   const draftRef = useRef(crop);
   const interactionRef = useRef<CropInteraction | null>(null);
+  const [sourceAspect, setSourceAspect] = useState(FOCUS_FRAME_RATIO);
+  const imageFrame = useMemo(() => containedImageFrame(sourceAspect, FOCUS_FRAME_RATIO), [sourceAspect]);
 
   useEffect(() => {
     draftRef.current = crop;
@@ -1552,7 +1566,12 @@ function FocusPicker({ source, crop, onSelectCenter, onCommit }: { source: strin
   function point(event: React.PointerEvent<HTMLElement>) {
     const bounds = pickerRef.current?.getBoundingClientRect();
     if (!bounds) return { x: 0.5, y: 0.5 };
-    return { x: clamp((event.clientX - bounds.left) / bounds.width, 0, 1), y: clamp((event.clientY - bounds.top) / bounds.height, 0, 1) };
+    const x = (event.clientX - bounds.left) / bounds.width;
+    const y = (event.clientY - bounds.top) / bounds.height;
+    return {
+      x: clamp((x - imageFrame.x) / imageFrame.width, 0, 1),
+      y: clamp((y - imageFrame.y) / imageFrame.height, 0, 1),
+    };
   }
 
   function choosePosition(event: React.PointerEvent<HTMLDivElement>) {
@@ -1614,19 +1633,21 @@ function FocusPicker({ source, crop, onSelectCenter, onCommit }: { source: strin
   ] as const;
 
   return (
-    <div>
-      <div ref={pickerRef} role="button" tabIndex={0} aria-label="원본 이미지에서 핵심 부위 선택. 확대 영역은 이동, 모서리 조절, 회전이 가능합니다." className="focus-picker relative cursor-crosshair overflow-hidden rounded-2xl border border-[#c5d8cf] bg-[#f8faf8] shadow-inner" onPointerDown={choosePosition} onPointerMove={updateInteraction} onPointerUp={endInteraction} onPointerCancel={endInteraction} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelectCenter(0.5, 0.5); }}>
-        <img className="block h-auto w-full select-none" src={source} alt="핵심 부위 선택용 원본 이미지" draggable={false} />
-        <div className="absolute border-2 border-[#f4ca68] bg-[#f4ca68]/10 shadow-[0_0_0_9999px_rgba(9,28,20,.42)]" style={{ left: `${draft.x * 100}%`, top: `${draft.y * 100}%`, width: `${draft.width * 100}%`, height: `${draft.height * 100}%`, transform: `rotate(${draft.rotation}deg)`, transformOrigin: "center" }}>
+    <div className="focus-workspace">
+      <div ref={pickerRef} role="button" tabIndex={0} aria-label="원본 이미지에서 핵심 부위 선택. 확대 영역은 이동, 모서리 조절, 회전이 가능합니다." className="focus-picker focus-frame relative cursor-crosshair overflow-hidden" onPointerDown={choosePosition} onPointerMove={updateInteraction} onPointerUp={endInteraction} onPointerCancel={endInteraction} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") onSelectCenter(0.5, 0.5); }}>
+        <div className="absolute overflow-hidden bg-white" style={{ left: `${imageFrame.x * 100}%`, top: `${imageFrame.y * 100}%`, width: `${imageFrame.width * 100}%`, height: `${imageFrame.height * 100}%` }}>
+          <img className="h-full w-full select-none object-contain" src={source} alt="핵심 부위 선택용 원본 이미지" draggable={false} onLoad={(event) => setSourceAspect(event.currentTarget.naturalWidth / event.currentTarget.naturalHeight)} />
+        </div>
+        <div className="focus-crop absolute border" style={{ left: `${(imageFrame.x + draft.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + draft.y * imageFrame.height) * 100}%`, width: `${draft.width * imageFrame.width * 100}%`, height: `${draft.height * imageFrame.height * 100}%`, transform: `rotate(${draft.rotation}deg)`, transformOrigin: "center" }}>
           <button type="button" aria-label="확대 영역 이동" className="absolute inset-0 cursor-move" onPointerDown={(event) => beginInteraction(event, "move")} />
-          <span className="pointer-events-none absolute -top-7 left-0 whitespace-nowrap rounded-md bg-[#17352b] px-2 py-1 text-[10px] font-bold text-white">확대 영역</span>
-          <span className="pointer-events-none absolute left-1/2 top-1/2 h-5 w-5 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white bg-[#17352b]/80"><span className="absolute left-1/2 top-0 h-full border-l border-white/80" /><span className="absolute left-0 top-1/2 w-full border-t border-white/80" /></span>
-          {handles.map(([handle, position]) => <button key={handle} type="button" aria-label={`확대 영역 ${handle} 모서리 크기 조절`} className={cn("absolute z-10 h-4 w-4 rounded-sm border-2 border-[#17352b] bg-[#f4ca68] shadow-sm", position)} onPointerDown={(event) => beginInteraction(event, "resize", handle)} />)}
-          <span className="pointer-events-none absolute left-1/2 -top-8 h-7 border-l-2 border-[#f4ca68]" />
-          <button type="button" aria-label="확대 영역 회전" className="absolute left-1/2 -top-11 z-10 h-5 w-5 -translate-x-1/2 rounded-full border-2 border-[#17352b] bg-[#f4ca68] shadow-sm cursor-grab active:cursor-grabbing" onPointerDown={(event) => beginInteraction(event, "rotate")} />
+          <span className="focus-crop-label pointer-events-none absolute -top-6 left-0 whitespace-nowrap px-1.5 py-1 text-[9px] font-medium text-white">FOCUS</span>
+          <span className="pointer-events-none absolute left-1/2 top-1/2 h-4 w-4 -translate-x-1/2 -translate-y-1/2 border border-white bg-[#333]/80"><span className="absolute left-1/2 top-0 h-full border-l border-white/80" /><span className="absolute left-0 top-1/2 w-full border-t border-white/80" /></span>
+          {handles.map(([handle, position]) => <button key={handle} type="button" aria-label={`확대 영역 ${handle} 모서리 크기 조절`} className={cn("focus-crop-handle absolute z-10 h-3.5 w-3.5 border bg-white", position)} onPointerDown={(event) => beginInteraction(event, "resize", handle)} />)}
+          <span className="pointer-events-none absolute left-1/2 -top-7 h-6 border-l border-[#444]" />
+          <button type="button" aria-label="확대 영역 회전" className="focus-crop-rotate absolute left-1/2 -top-10 z-10 h-5 w-5 -translate-x-1/2 border bg-white cursor-grab active:cursor-grabbing" onPointerDown={(event) => beginInteraction(event, "rotate")} />
         </div>
       </div>
-      <p className="mt-2 flex items-center gap-1.5 text-[11px] leading-4 text-slate-500"><ScanSearch className="h-3.5 w-3.5 text-[#507366]" />원본을 클릭하면 중심을 이동합니다. 박스를 드래그하고, 모서리로 크기를, 위쪽 원으로 회전을 조절하세요.</p>
+      <p className="focus-workspace-note mt-2 flex items-center gap-1.5"><ScanSearch className="h-3 w-3" />fixed preview · original ratio</p>
     </div>
   );
 }
@@ -1637,6 +1658,8 @@ function CandidateBoundaryEditor({ source, crop, textRegions, showTextOverlay, d
   const [draft, setDraft] = useState(crop);
   const draftRef = useRef(crop);
   const interactionRef = useRef<CandidateInteraction | null>(null);
+  const [sourceAspect, setSourceAspect] = useState(CANDIDATE_FRAME_RATIO);
+  const imageFrame = useMemo(() => containedImageFrame(sourceAspect, CANDIDATE_FRAME_RATIO), [sourceAspect]);
 
   useEffect(() => {
     draftRef.current = crop;
@@ -1646,7 +1669,12 @@ function CandidateBoundaryEditor({ source, crop, textRegions, showTextOverlay, d
   function point(event: React.PointerEvent<HTMLElement>) {
     const bounds = editorRef.current?.getBoundingClientRect();
     if (!bounds) return { x: 0.5, y: 0.5 };
-    return { x: clamp((event.clientX - bounds.left) / bounds.width, 0, 1), y: clamp((event.clientY - bounds.top) / bounds.height, 0, 1) };
+    const x = (event.clientX - bounds.left) / bounds.width;
+    const y = (event.clientY - bounds.top) / bounds.height;
+    return {
+      x: clamp((x - imageFrame.x) / imageFrame.width, 0, 1),
+      y: clamp((y - imageFrame.y) / imageFrame.height, 0, 1),
+    };
   }
 
   function updateDraft(next: Crop) {
@@ -1695,17 +1723,19 @@ function CandidateBoundaryEditor({ source, crop, textRegions, showTextOverlay, d
   ] as const;
 
   return (
-    <div ref={editorRef} aria-label={`${documentLabel} 그림 후보 경계 편집기`} className="relative overflow-hidden bg-slate-100" onPointerMove={move} onPointerUp={end} onPointerCancel={end}>
-      <img className="block h-auto w-full select-none" src={source} alt={`${documentLabel} PDF 원본 페이지`} draggable={false} />
-      <div className="pointer-events-none absolute inset-0 bg-black/10" />
-      {showTextOverlay && textRegions.map((region, index) => <span key={index} className="pointer-events-none absolute border border-dashed border-[#d4713e] bg-[#f6a56f]/35" style={{ left: `${region.x * 100}%`, top: `${region.y * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%` }} />)}
-      <div className="absolute border-2 border-[#f4ca68] bg-[#f4ca68]/15 shadow-[0_0_0_9999px_rgba(17,40,31,.28)]" style={{ left: `${draft.x * 100}%`, top: `${draft.y * 100}%`, width: `${draft.width * 100}%`, height: `${draft.height * 100}%` }}>
-        <button type="button" aria-label="그림 후보 경계 이동" className="absolute inset-0 cursor-move" onPointerDown={(event) => begin(event, "move")} />
-        <span className="pointer-events-none absolute -top-7 left-0 whitespace-nowrap rounded-md bg-[#17352b] px-2 py-1 text-[10px] font-bold text-white">드래그하여 경계 이동</span>
-        {handles.map(([handle, position]) => <button key={handle} type="button" aria-label={`그림 후보 ${handle} 모서리 크기 조절`} className={cn("absolute z-10 h-3.5 w-3.5 rounded-sm border-2 border-[#17352b] bg-[#f4ca68] shadow-sm", position)} onPointerDown={(event) => begin(event, "resize", handle)} />)}
+    <div ref={editorRef} aria-label={`${documentLabel} 그림 후보 경계 편집기`} className="candidate-boundary-editor relative overflow-hidden bg-[#f6f6f6]" onPointerMove={move} onPointerUp={end} onPointerCancel={end}>
+      <div className="absolute overflow-hidden bg-white" style={{ left: `${imageFrame.x * 100}%`, top: `${imageFrame.y * 100}%`, width: `${imageFrame.width * 100}%`, height: `${imageFrame.height * 100}%` }}>
+        <img className="h-full w-full select-none object-contain" src={source} alt={`${documentLabel} PDF 원본 페이지`} draggable={false} onLoad={(event) => setSourceAspect(event.currentTarget.naturalWidth / event.currentTarget.naturalHeight)} />
       </div>
-      <span className="pointer-events-none absolute left-3 top-3 rounded-full bg-[#17352b] px-2 py-1 text-[10px] font-bold text-white">{documentLabel}</span>
-      {showTextOverlay && <span className="pointer-events-none absolute bottom-3 left-3 rounded-full bg-[#d4713e] px-2 py-1 text-[10px] font-bold text-white">{detection === "ocr" ? "OCR 본문 제외" : detection === "native" ? "PDF 텍스트 제외" : "본문 영역 없음"}</span>}
+      <div className="pointer-events-none absolute inset-0 bg-black/5" />
+      {showTextOverlay && textRegions.map((region, index) => <span key={index} className="pointer-events-none absolute border border-dashed border-zinc-500 bg-zinc-200/55" style={{ left: `${(imageFrame.x + region.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + region.y * imageFrame.height) * 100}%`, width: `${region.width * imageFrame.width * 100}%`, height: `${region.height * imageFrame.height * 100}%` }} />)}
+      <div className="candidate-crop absolute border" style={{ left: `${(imageFrame.x + draft.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + draft.y * imageFrame.height) * 100}%`, width: `${draft.width * imageFrame.width * 100}%`, height: `${draft.height * imageFrame.height * 100}%` }}>
+        <button type="button" aria-label="그림 후보 경계 이동" className="absolute inset-0 cursor-move" onPointerDown={(event) => begin(event, "move")} />
+        <span className="focus-crop-label pointer-events-none absolute -top-6 left-0 whitespace-nowrap px-1.5 py-1 text-[9px] font-medium text-white">FIGURE</span>
+        {handles.map(([handle, position]) => <button key={handle} type="button" aria-label={`그림 후보 ${handle} 모서리 크기 조절`} className={cn("focus-crop-handle absolute z-10 h-3 w-3 border bg-white", position)} onPointerDown={(event) => begin(event, "resize", handle)} />)}
+      </div>
+      <span className="archive-float-label pointer-events-none absolute left-2 top-2">{documentLabel}</span>
+      {showTextOverlay && <span className="archive-float-label pointer-events-none absolute bottom-2 left-2">{detection === "ocr" ? "OCR" : detection === "native" ? "TEXT" : "NONE"}</span>}
     </div>
   );
 }

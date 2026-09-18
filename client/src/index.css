@@ -104,7 +104,17 @@
 .mini-grid { display: grid; grid-template-columns: repeat(60, 1fr); grid-template-rows: repeat(40, 1fr); width: 48px; height: 32px; padding: 2px; background: #fff; }
 .mini-dot { display: block; }
 .mini-dot-raised { background: #777; border-radius: 999px; }
-.focus-picker { border-color: #dedede; border-radius: 0; box-shadow: none; }
+.focus-workspace { min-width: 0; }
+.focus-picker { border: 1px solid #dedede; border-radius: 0; box-shadow: none; }
+.focus-frame { aspect-ratio: 16 / 9; background-color: #f6f6f6; background-image: linear-gradient(45deg, #f1f1f1 25%, transparent 25%), linear-gradient(-45deg, #f1f1f1 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #f1f1f1 75%), linear-gradient(-45deg, transparent 75%, #f1f1f1 75%); background-position: 0 0, 0 6px, 6px -6px, -6px 0; background-size: 12px 12px; }
+.focus-crop, .candidate-crop { border-color: #3f3f3f; background: rgb(255 255 255 / 8%); box-shadow: 0 0 0 9999px rgb(0 0 0 / 25%); }
+.focus-crop-label, .archive-float-label { background: #383838; font-family: "IBM Plex Mono", monospace; font-size: 9px; letter-spacing: .06em; }
+.focus-crop-handle { border-color: #3f3f3f; box-shadow: 0 0 0 1px rgb(255 255 255 / 75%); }
+.focus-crop-rotate { border-color: #3f3f3f; box-shadow: 0 0 0 1px rgb(255 255 255 / 75%); }
+.focus-crop-rotate::before { content: ""; position: absolute; inset: 5px; border: 1px solid #555; border-left-color: transparent; border-radius: 50%; }
+.focus-workspace-note { color: #898989; font-family: "IBM Plex Mono", monospace; font-size: 9px; letter-spacing: .05em; text-transform: uppercase; }
+.candidate-boundary-editor { aspect-ratio: 4 / 3; }
+.archive-float-label { padding: 4px 6px; color: #fff; }
 
 @media (min-width: 640px) { .archive-masonry { columns: 2; } }
 @media (min-width: 1280px) { .archive-masonry { columns: 3; } }

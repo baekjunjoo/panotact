@@ -112,7 +112,6 @@
 .focus-crop-handle { border-color: #3f3f3f; box-shadow: 0 0 0 1px rgb(255 255 255 / 75%); }
 .focus-crop-rotate { border-color: #3f3f3f; box-shadow: 0 0 0 1px rgb(255 255 255 / 75%); }
 .focus-crop-rotate::before { content: ""; position: absolute; inset: 5px; border: 1px solid #555; border-left-color: transparent; border-radius: 50%; }
-.focus-workspace-note { color: #898989; font-family: "IBM Plex Mono", monospace; font-size: 9px; letter-spacing: .05em; text-transform: uppercase; }
 .candidate-boundary-editor { aspect-ratio: 4 / 3; }
 .archive-float-label { padding: 4px 6px; color: #fff; }
 

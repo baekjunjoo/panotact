@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
 import {
   ArrowRight,
@@ -25,7 +25,6 @@ import {
   PencilRuler,
   RefreshCw,
   RotateCcw,
-  ScanSearch,
   Save,
   Trash2,
   Redo2,
@@ -54,6 +53,7 @@ const FOCUS_FRAME_RATIO = 16 / 9;
 const CANDIDATE_FRAME_RATIO = 4 / 3;
 const FULL_CROP = { x: 0, y: 0, width: 1, height: 1, rotation: 0 };
 const EMPTY_GRID = () => Array.from({ length: GRID_HEIGHT }, () => Array(GRID_WIDTH).fill(false));
+const imageLoadCache = new Map<string, Promise<HTMLImageElement>>();
 
 type ConversionMode = "edges" | "filled";
 type PageKind = "overall" | "structure" | "focus" | "manual";
@@ -302,12 +302,16 @@ function gridToBitmapHex(grid: boolean[][]) {
 }
 
 function loadImage(source: string): Promise<HTMLImageElement> {
-  return new Promise((resolve, reject) => {
+  const cached = imageLoadCache.get(source);
+  if (cached) return cached;
+  const loaded = new Promise<HTMLImageElement>((resolve, reject) => {
     const image = new Image();
     image.onload = () => resolve(image);
     image.onerror = () => reject(new Error("이미지를 불러올 수 없습니다."));
     image.src = source;
   });
+  imageLoadCache.set(source, loaded);
+  return loaded;
 }
 
 async function getImageDataFromSource(
@@ -589,7 +593,6 @@ export default function Home() {
   const [brushSize, setBrushSize] = useState(1);
   const [isLoading, setIsLoading] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [isFocusing, setIsFocusing] = useState(false);
   const [status, setStatus] = useState("이미지 또는 PDF를 올리면 3개의 촉각 구조도 초안을 만듭니다.");
   const [isDrawing, setIsDrawing] = useState(false);
   const [undoCount, setUndoCount] = useState(0);
@@ -609,6 +612,8 @@ export default function Home() {
   const undoStackRef = useRef<WorkspaceSnapshot[]>([]);
   const redoStackRef = useRef<WorkspaceSnapshot[]>([]);
   const focusRenderRef = useRef(0);
+  const focusPreviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const focusPreviewCropRef = useRef<Crop | null>(null);
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const activePage = useMemo(
@@ -847,9 +852,8 @@ export default function Home() {
     ]));
   }
 
-  async function refreshFocusPage(sourceSet: SourceSet) {
+  async function refreshFocusPage(sourceSet: SourceSet, announce = true) {
     const requestId = ++focusRenderRef.current;
-    setIsFocusing(true);
     try {
       const grid = await gridFor(sourceSet.source, sourceSet.selectedCrop, "focus");
       if (requestId !== focusRenderRef.current) return;
@@ -860,12 +864,28 @@ export default function Home() {
             : page,
         ),
       );
-      setStatus("핵심 부위 확대 페이지를 선택한 영역으로 갱신했습니다.");
+      if (announce) setStatus("핵심 부위 확대 페이지를 선택한 영역으로 갱신했습니다.");
     } catch {
-      setStatus("핵심 부위 확대를 만들 수 없습니다. 다른 위치를 선택해 주세요.");
-    } finally {
-      if (requestId === focusRenderRef.current) setIsFocusing(false);
+      if (announce) setStatus("핵심 부위 확대를 만들 수 없습니다. 다른 위치를 선택해 주세요.");
     }
+  }
+
+  function selectFocusCanvas(sourceSet: SourceSet) {
+    const focusPage = pages.find((page) => page.sourceKey === sourceSet.id && page.kind === "focus");
+    if (focusPage) setSelectedId(focusPage.id);
+  }
+
+  function previewFocusCrop(crop: Crop) {
+    if (!activeSourceSet) return;
+    const previewSet = { ...activeSourceSet, selectedCrop: constrainCrop(crop) };
+    focusPreviewCropRef.current = previewSet.selectedCrop;
+    selectFocusCanvas(previewSet);
+    if (focusPreviewTimerRef.current) return;
+    focusPreviewTimerRef.current = setTimeout(() => {
+      focusPreviewTimerRef.current = null;
+      const latestCrop = focusPreviewCropRef.current;
+      if (latestCrop) void refreshFocusPage({ ...previewSet, selectedCrop: latestCrop }, false);
+    }, 48);
   }
 
   async function createSourceSet(input: SourceInput): Promise<SourceSet> {
@@ -1412,23 +1432,13 @@ export default function Home() {
     recordHistory();
     const updatedSet = { ...activeSourceSet, selectedCrop: constrainCrop(crop) };
     setSourceSets((current) => current.map((item) => (item.id === updatedSet.id ? updatedSet : item)));
+    selectFocusCanvas(updatedSet);
     void refreshFocusPage(updatedSet);
-  }
-
-  function updateFocusCrop(patch: Partial<Crop>) {
-    if (!activeSourceSet) return;
-    selectFocusCrop({ ...activeSourceSet.selectedCrop, ...patch });
   }
 
   function selectFocusAt(centerX: number, centerY: number) {
     if (!activeSourceSet) return;
     selectFocusCrop(cropFromCenter(centerX, centerY, activeSourceSet.selectedCrop.width, activeSourceSet.aspect, activeSourceSet.selectedCrop.rotation));
-  }
-
-  function changeFocusScale(width: number) {
-    if (!activeSourceSet) return;
-    const center = cropCenter(activeSourceSet.selectedCrop);
-    selectFocusCrop(cropFromCenter(center.x, center.y, width, activeSourceSet.aspect, activeSourceSet.selectedCrop.rotation));
   }
 
   function downloadDtms() {
@@ -1527,7 +1537,7 @@ export default function Home() {
 
         {learningFlow.length > 0 && <section className="archive-card mb-4"><div className="archive-section-heading"><span>FLOW</span><span>{learningFlow.length}</span></div><div className="grid divide-y divide-[#111] md:grid-cols-2 md:divide-x md:divide-y-0 xl:grid-cols-4">{learningFlow.slice().sort((left, right) => left.documentOrder - right.documentOrder || left.candidateOrder - right.candidateOrder).map((entry, index) => { const tactilePages = entry.pageIds.map((pageId) => pages.find((page) => page.id === pageId)).filter((page): page is TactilePage => Boolean(page)); return <article key={entry.id} className="p-3"><div className="flex items-center justify-between text-[10px] text-zinc-500"><span>{String(index + 1).padStart(2, "0")}</span><span>{entry.documentName} · {entry.pageNumber}</span></div><img src={entry.source} alt={`${entry.documentName} ${entry.pageNumber}쪽에서 선택한 그림`} className="mt-2 aspect-[4/3] w-full border border-[#111] object-contain" /><Textarea aria-label={`${entry.label} 그림 설명`} id={`flow-description-${entry.id}`} className="mt-2 min-h-16 border-[#111] bg-transparent text-xs" value={entry.description} onFocus={recordHistory} onChange={(event) => updateLearningDescription(entry.id, event.target.value)} /><div className="mt-2 flex gap-1">{tactilePages.map((page) => <button key={page.id} title={pageInfo(page.kind).title} aria-label={`${entry.label} ${pageInfo(page.kind).title} 열기`} onClick={() => { setSelectedId(page.id); setStatus(`${entry.documentName} ${entry.pageNumber}쪽과 연결된 ${pageInfo(page.kind).title} 페이지를 열었습니다.`); }} className={cn("archive-page-dot", page.id === selectedId && "bg-[#2f45ff] text-white")}>{pageInfo(page.kind).title.slice(0, 1)}</button>)}<Button variant="ghost" size="sm" className="archive-open-button ml-auto" onClick={() => openLearningEntry(entry)} aria-label={`${entry.label} 학습 단위 열기`}><ArrowRight className="h-4 w-4" /></Button></div></article>; })}</div></section>}
 
-        {activeSourceSet && <section className="archive-card mb-4"><div className="archive-section-heading"><span>FOCUS</span><span className="truncate">{activeSourceSet.label}</span></div><div className="grid lg:grid-cols-[minmax(0,1fr)_280px]"><div className="border-b border-[#111] p-3 lg:border-b-0 lg:border-r"><FocusPicker source={activeSourceSet.source} crop={activeSourceSet.selectedCrop} onSelectCenter={selectFocusAt} onCommit={selectFocusCrop} /></div><div className="p-3"><div className="grid grid-cols-3 gap-1">{activeSourceSet.candidates.map((candidate) => { const chosen = Math.abs(candidate.crop.x - activeSourceSet.selectedCrop.x) < 0.01 && Math.abs(candidate.crop.y - activeSourceSet.selectedCrop.y) < 0.01; return <button key={candidate.id} onClick={() => selectFocusCrop(candidate.crop)} className={cn("archive-choice-button", chosen && "bg-[#2f45ff] text-white")}>{candidate.label}</button>; })}</div><div className="mt-4 grid grid-cols-3 gap-1">{[["S", 0.34], ["M", 0.5], ["L", 0.68]].map(([label, width]) => <button key={String(label)} onClick={() => changeFocusScale(Number(width))} className={cn("archive-choice-button", Math.abs(activeSourceSet.selectedCrop.width - Number(width)) < 0.08 && "bg-[#111] text-white")}>{label}</button>)}</div><div className="mt-5 grid grid-cols-2 gap-3"><CropSlider label="W" value={Number((activeSourceSet.selectedCrop.width * 100).toFixed(1))} min={12} max={96} step={0.1} suffix="%" onChange={(value) => updateFocusCrop({ width: value / 100 })} /><CropSlider label="H" value={Number((activeSourceSet.selectedCrop.height * 100).toFixed(1))} min={12} max={96} step={0.1} suffix="%" onChange={(value) => updateFocusCrop({ height: value / 100 })} /></div><div className="mt-4"><CropSlider label="R" value={Math.round(activeSourceSet.selectedCrop.rotation)} min={-180} max={180} step={1} suffix="°" onChange={(value) => updateFocusCrop({ rotation: value })} /></div><span aria-live="polite" className="sr-only">{isFocusing ? "핵심 부위를 변환 중" : "핵심 부위 설정 완료"}</span></div></div></section>}
+        {activeSourceSet && <section className="archive-card mb-4"><div className="archive-section-heading"><span>FOCUS</span><span className="truncate">{activeSourceSet.label}</span></div><div className="p-3"><FocusPicker source={activeSourceSet.source} crop={activeSourceSet.selectedCrop} onSelectCenter={selectFocusAt} onPreview={previewFocusCrop} onCommit={selectFocusCrop} /></div></section>}
 
         <div className="grid gap-4 xl:grid-cols-[260px_minmax(0,1fr)_280px]">
           <aside className="archive-card order-2 xl:order-1"><div className="archive-section-heading"><span>PAGES</span><span>{pages.length}</span></div><div className="divide-y divide-[#111]">{pages.map((page, index) => <button key={page.id} className={cn("flex w-full items-center gap-2 p-2 text-left transition hover:bg-[#f1f1f1]", page.id === selectedId && "bg-[#dfe5ff]")} onClick={() => setSelectedId(page.id)}><div className="grid h-10 w-14 shrink-0 place-items-center border border-[#111] bg-white"><MiniGrid grid={page.grid} /></div><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{page.title || `PAGE ${index + 1}`}</span><span className="text-[10px] text-zinc-500">{dotCount(page.grid)} dots</span></span></button>)}</div><div className="grid grid-cols-2 border-t border-[#111]"><Button variant="ghost" className="archive-action-button border-r border-[#111]" onClick={addBlankPage}><FilePlus2 className="mr-2 h-4 w-4" />NEW</Button><Button variant="ghost" className="archive-action-button" onClick={duplicatePage}><Layers3 className="mr-2 h-4 w-4" />COPY</Button></div></aside>
@@ -1543,7 +1553,7 @@ export default function Home() {
   );
 }
 
-function FocusPicker({ source, crop, onSelectCenter, onCommit }: { source: string; crop: Crop; onSelectCenter: (x: number, y: number) => void; onCommit: (crop: Crop) => void }) {
+function FocusPicker({ source, crop, onSelectCenter, onPreview, onCommit }: { source: string; crop: Crop; onSelectCenter: (x: number, y: number) => void; onPreview: (crop: Crop) => void; onCommit: (crop: Crop) => void }) {
   type CropInteraction = { type: "move" | "resize" | "rotate"; handle?: "nw" | "ne" | "se" | "sw"; startX: number; startY: number; origin: Crop };
   const pickerRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState(crop);
@@ -1561,6 +1571,7 @@ function FocusPicker({ source, crop, onSelectCenter, onCommit }: { source: strin
     const constrained = constrainCrop(next);
     draftRef.current = constrained;
     setDraft(constrained);
+    onPreview(constrained);
   }
 
   function point(event: React.PointerEvent<HTMLElement>) {
@@ -1585,6 +1596,7 @@ function FocusPicker({ source, crop, onSelectCenter, onCommit }: { source: strin
     event.stopPropagation();
     const start = point(event);
     interactionRef.current = { type, handle, startX: start.x, startY: start.y, origin: draftRef.current };
+    onPreview(draftRef.current);
     try {
       event.currentTarget.setPointerCapture(event.pointerId);
     } catch {
@@ -1647,7 +1659,6 @@ function FocusPicker({ source, crop, onSelectCenter, onCommit }: { source: strin
           <button type="button" aria-label="확대 영역 회전" className="focus-crop-rotate absolute left-1/2 -top-10 z-10 h-5 w-5 -translate-x-1/2 border bg-white cursor-grab active:cursor-grabbing" onPointerDown={(event) => beginInteraction(event, "rotate")} />
         </div>
       </div>
-      <p className="focus-workspace-note mt-2 flex items-center gap-1.5"><ScanSearch className="h-3 w-3" />fixed preview · original ratio</p>
     </div>
   );
 }
@@ -1740,13 +1751,15 @@ function CandidateBoundaryEditor({ source, crop, textRegions, showTextOverlay, d
   );
 }
 
-function CropSlider({ label, value, min, max, step = 1, suffix, onChange }: { label: string; value: number; min: number; max: number; step?: number; suffix: string; onChange: (value: number) => void }) {
-  return <div><div className="flex items-center justify-between gap-2"><p className="text-[11px] font-bold text-slate-600">{label}</p><label className="flex items-center gap-1 text-[10px] font-bold text-[#315c4d]"><Input aria-label={`${label} 정밀 수치`} type="number" className="h-6 w-15 rounded-md border-[#cfe0d7] bg-white px-1.5 text-right text-[10px]" min={min} max={max} step={step} value={value} onChange={(event) => { const next = Number(event.target.value); if (Number.isFinite(next)) onChange(clamp(next, min, max)); }} />{suffix}</label></div><Slider className="mt-2" min={min} max={max} step={step} value={[value]} onValueChange={([next]) => onChange(next)} /></div>;
-}
-
-function MiniGrid({ grid }: { grid: boolean[][] }) {
-  return <div className="mini-grid">{grid.map((row, y) => row.map((raised, x) => <span key={`${x}-${y}`} className={raised ? "mini-dot mini-dot-raised" : "mini-dot"} />))}</div>;
-}
+const MiniGrid = memo(function MiniGrid({ grid }: { grid: boolean[][] }) {
+  return (
+    <div className="mini-grid">
+      {grid.map((row, y) => row.map((raised, x) => (
+        <span key={`${x}-${y}`} className={raised ? "mini-dot mini-dot-raised" : "mini-dot"} />
+      )))}
+    </div>
+  );
+});
 
 function SettingSlider({ label, value, min, max, onChange, description }: { label: string; value: number; min: number; max: number; onChange: (value: number) => void; description?: string }) {
   return <div className="mt-5"><div className="flex items-center justify-between"><p className="archive-label">{label}</p><span className="text-[10px] text-zinc-500">{value}</span></div><Slider className="mt-3" min={min} max={max} step={1} value={[value]} onValueChange={([next]) => onChange(next)} /></div>;

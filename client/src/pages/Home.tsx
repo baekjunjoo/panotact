@@ -57,6 +57,8 @@ const imageLoadCache = new Map<string, Promise<HTMLImageElement>>();
 
 type ConversionMode = "edges" | "filled";
 type PageKind = "overall" | "structure" | "focus" | "manual";
+type DetailLevel = "form" | "structure" | "texture";
+type TactilePattern = "contour" | "dots" | "hatch" | "crosshatch";
 type Crop = { x: number; y: number; width: number; height: number; rotation: number };
 type FocusOutline = { points: Array<[number, number]>; crop: Crop };
 type FocusCandidate = { id: string; label: string; crop: Crop; score: number };
@@ -94,6 +96,8 @@ type TactilePage = {
   source?: string;
   sourceKey?: string;
   crop?: Crop;
+  detailLevel?: DetailLevel;
+  pattern?: TactilePattern;
 };
 
 type WorkspaceSnapshot = {
@@ -125,6 +129,19 @@ type TemporaryDraft = {
 const DRAFT_DATABASE = "tactile-dtms-studio";
 const DRAFT_STORE = "drafts";
 const DRAFT_KEY = "current-workspace";
+
+const DETAIL_LEVELS: Array<{ id: DetailLevel; label: string; description: string }> = [
+  { id: "form", label: "형태", description: "외곽 윤곽" },
+  { id: "structure", label: "구조", description: "주요 경계" },
+  { id: "texture", label: "표면", description: "질감 밀도" },
+];
+
+const TACTILE_PATTERNS: Array<{ id: TactilePattern; label: string; description: string }> = [
+  { id: "contour", label: "윤곽", description: "선 중심" },
+  { id: "dots", label: "점돌기", description: "성긴 점" },
+  { id: "hatch", label: "사선", description: "방향선" },
+  { id: "crosshatch", label: "교차선", description: "격자 질감" },
+];
 
 function createId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -632,6 +649,55 @@ function sourceToStructureGrid(imageData: ImageData, threshold: number, filled: 
   return result;
 }
 
+function sourceToTextureGrid(imageData: ImageData, threshold: number) {
+  const subject = largestComponent(foregroundMask(imageData));
+  const result = EMPTY_GRID();
+  const textureLimit = 34 + threshold * 0.19;
+
+  for (let y = 0; y < GRID_HEIGHT; y += 1) {
+    for (let x = 0; x < GRID_WIDTH; x += 1) {
+      if (!subject[y][x]) continue;
+      const horizontal = colorDistance(pixel(imageData, x + 1, y), pixel(imageData, x - 1, y));
+      const vertical = colorDistance(pixel(imageData, x, y + 1), pixel(imageData, x, y - 1));
+      const current = pixel(imageData, x, y);
+      result[y][x] = horizontal + vertical > textureLimit || luminance(current) < threshold * 0.72;
+    }
+  }
+  return result;
+}
+
+function patternAt(pattern: TactilePattern, x: number, y: number) {
+  if (pattern === "dots") return x % 4 === 1 && y % 4 === 1;
+  if (pattern === "hatch") return (x + y) % 6 === 0;
+  if (pattern === "crosshatch") return (x + y) % 7 === 0 || (x - y + GRID_WIDTH) % 7 === 0;
+  return false;
+}
+
+function applyTactilePattern(base: boolean[][], imageData: ImageData, pattern: TactilePattern, detailLevel: DetailLevel) {
+  if (pattern === "contour") return base;
+  const subject = largestComponent(foregroundMask(imageData));
+  const result = EMPTY_GRID();
+  for (let y = 0; y < GRID_HEIGHT; y += 1) {
+    for (let x = 0; x < GRID_WIDTH; x += 1) {
+      if (!subject[y][x]) continue;
+      const boundary = [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1]].some(([nextX, nextY]) => nextX < 0 || nextY < 0 || nextX >= GRID_WIDTH || nextY >= GRID_HEIGHT || !subject[nextY][nextX]);
+      const retainedTexture = detailLevel === "texture" && base[y][x] && (x * 3 + y * 5) % 4 === 0;
+      result[y][x] = boundary || patternAt(pattern, x, y) || retainedTexture;
+    }
+  }
+  return result;
+}
+
+function defaultDetailLevel(kind: PageKind): DetailLevel {
+  if (kind === "overall") return "form";
+  if (kind === "structure") return "structure";
+  return "texture";
+}
+
+function defaultPattern(kind: PageKind): TactilePattern {
+  return kind === "focus" ? "dots" : "contour";
+}
+
 function scoreCrop(imageData: ImageData, crop: Crop) {
   const startX = Math.floor(crop.x * imageData.width);
   const endX = Math.min(imageData.width - 1, Math.ceil((crop.x + crop.width) * imageData.width));
@@ -888,6 +954,27 @@ export default function Home() {
     setPages((current) => current.map((page) => (page.id === activePage.id ? { ...page, ...patch } : page)));
   }
 
+  function updateTactileSettings(patch: Pick<TactilePage, "detailLevel" | "pattern">) {
+    if (!activePage?.source || activePage.kind === "manual") return;
+    const source = activePage.source;
+    const nextPage = {
+      ...activePage,
+      ...patch,
+      detailLevel: patch.detailLevel ?? activePage.detailLevel ?? defaultDetailLevel(activePage.kind),
+      pattern: patch.pattern ?? activePage.pattern ?? defaultPattern(activePage.kind),
+    };
+    recordHistory();
+    updateActivePage(patch);
+    setIsGenerating(true);
+    void gridFor(source, nextPage.crop ?? FULL_CROP, nextPage.kind, nextPage.detailLevel, nextPage.pattern)
+      .then((grid) => {
+        setPages((current) => current.map((page) => page.id === nextPage.id ? { ...page, grid, detailLevel: nextPage.detailLevel, pattern: nextPage.pattern } : page));
+        setStatus(`${DETAIL_LEVELS.find((level) => level.id === nextPage.detailLevel)?.label ?? "상세"} · ${TACTILE_PATTERNS.find((item) => item.id === nextPage.pattern)?.label ?? "패턴"} 설정을 현재 페이지에 적용했습니다.`);
+      })
+      .catch(() => setStatus("상세도 설정을 적용할 수 없습니다. 원본 이미지를 다시 확인해 주세요."))
+      .finally(() => setIsGenerating(false));
+  }
+
   function applyAt(x: number, y: number) {
     if (!activePage || x < 0 || y < 0 || x >= GRID_WIDTH || y >= GRID_HEIGHT) return;
     const radius = brushSize === 3 ? 1 : 0;
@@ -924,22 +1011,28 @@ export default function Home() {
     applyAt(x, y);
   }
 
-  async function gridFor(source: string, crop: Crop, kind: PageKind) {
+  async function gridFor(source: string, crop: Crop, kind: PageKind, detailLevel = defaultDetailLevel(kind), pattern = defaultPattern(kind)) {
     const imageData = await getImageDataFromSource(source, crop);
     let raw: boolean[][];
-    if (kind === "overall") {
+    if (detailLevel === "form") {
       raw = sourceToOverallGrid(imageData);
+    } else if (detailLevel === "texture") {
+      raw = sourceToTextureGrid(imageData, threshold);
     } else {
       raw = sourceToStructureGrid(imageData, threshold, mode === "filled", kind === "focus");
     }
-    const passes = kind === "overall" ? Math.max(1, simplification) : simplification;
+    raw = applyTactilePattern(raw, imageData, pattern, detailLevel);
+    const passes = detailLevel === "form" ? Math.max(1, simplification) : simplification;
     raw = simplifyGrid(raw, passes);
     return invert ? raw.map((row) => row.map((value) => !value)) : raw;
   }
 
   async function makeAutoPage(sourceSet: SourceSet, kind: Exclude<PageKind, "manual">, includeSourceLabel: boolean): Promise<TactilePage> {
     const crop = kind === "focus" ? sourceSet.selectedCrop : FULL_CROP;
-    const grid = await gridFor(sourceSet.source, crop, kind);
+    const currentPage = pages.find((page) => page.sourceKey === sourceSet.id && page.kind === kind);
+    const detailLevel = currentPage?.detailLevel ?? defaultDetailLevel(kind);
+    const pattern = currentPage?.pattern ?? defaultPattern(kind);
+    const grid = await gridFor(sourceSet.source, crop, kind, detailLevel, pattern);
     const info = pageInfo(kind);
     const altText =
       kind === "overall"
@@ -956,6 +1049,8 @@ export default function Home() {
       source: sourceSet.source,
       sourceKey: sourceSet.id,
       crop,
+      detailLevel,
+      pattern,
     };
   }
 
@@ -971,7 +1066,8 @@ export default function Home() {
   async function refreshFocusPage(sourceSet: SourceSet, announce = true) {
     const requestId = ++focusRenderRef.current;
     try {
-      const grid = await gridFor(sourceSet.source, sourceSet.selectedCrop, "focus");
+      const focusPage = pages.find((page) => page.sourceKey === sourceSet.id && page.kind === "focus");
+      const grid = await gridFor(sourceSet.source, sourceSet.selectedCrop, "focus", focusPage?.detailLevel ?? defaultDetailLevel("focus"), focusPage?.pattern ?? defaultPattern("focus"));
       if (requestId !== focusRenderRef.current) return;
       setPages((current) =>
         current.map((page) =>
@@ -1640,13 +1736,81 @@ export default function Home() {
 
           <section className="archive-card order-1 min-w-0 xl:order-2"><div className="archive-section-heading"><span>CANVAS</span><span>{pageInfo(activePage?.kind ?? "manual").title}</span><div className="ml-auto flex gap-1"><Button size="sm" variant="ghost" className={cn("archive-mini-button", tool === "draw" && "bg-[#111] text-white hover:bg-[#111] hover:text-white")} onClick={() => setTool("draw")}><MousePointer2 className="mr-1 h-3.5 w-3.5" />DRAW</Button><Button size="sm" variant="ghost" className={cn("archive-mini-button", tool === "erase" && "bg-[#111] text-white hover:bg-[#111] hover:text-white")} onClick={() => setTool("erase")}><Eraser className="mr-1 h-3.5 w-3.5" />ERASE</Button></div></div><div className="grid gap-3 p-3 2xl:grid-cols-[minmax(0,1fr)_150px]"><div className="border border-[#111] bg-[#f7f7f7] p-3 sm:p-4"><div role="application" aria-label="60 곱하기 40 촉각 점자 격자. 클릭하여 점을 편집합니다." className="tactile-grid mx-auto aspect-[3/2] w-full max-w-[760px] touch-none select-none bg-white p-[2.3%]" onPointerDown={handleGridPointerDown} onPointerMove={handleGridPointerMove} onPointerUp={() => setIsDrawing(false)} onPointerLeave={() => setIsDrawing(false)} onPointerCancel={() => setIsDrawing(false)}>{activePage?.grid.map((row, y) => row.map((raised, x) => <span key={`${x}-${y}`} className={cn("dot", raised && "dot-raised")} />))}</div><div className="mt-2 flex justify-between text-[10px] uppercase text-zinc-500"><span>60 × 40</span><span>{activePage ? dotCount(activePage.grid) : 0} dots</span></div></div><div className="flex flex-col gap-3"><div className="border border-[#111] p-2">{sourceImage ? <img className="aspect-[3/2] w-full object-contain" src={sourceImage} alt="업로드한 원본" /> : <div className="grid aspect-[3/2] place-items-center text-[10px] text-zinc-400">NO SOURCE</div>}</div><div className="grid grid-cols-2 gap-1">{[1, 3].map((size) => <button key={size} onClick={() => setBrushSize(size)} className={cn("archive-choice-button", brushSize === size && "bg-[#2f45ff] text-white")}>{size === 1 ? "1" : "3×3"}</button>)}</div><Button variant="ghost" className="archive-action-button border border-[#111]" onClick={resetActiveGrid}><RotateCcw className="mr-2 h-4 w-4" />CLEAR</Button></div></div><div className="grid border-t border-[#111] md:grid-cols-[1fr_auto]"><div className="grid gap-3 p-3 sm:grid-cols-2"><div><Label htmlFor="page-title" className="archive-label">TITLE</Label><Input id="page-title" className="archive-input mt-1" value={activePage?.title ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ title: event.target.value })} /></div><div><Label htmlFor="alt-text" className="archive-label">ALT</Label><Textarea id="alt-text" className="archive-input mt-1 min-h-10" value={activePage?.altText ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ altText: event.target.value })} /></div></div><div className="flex border-t border-[#111] md:border-l md:border-t-0"><Button variant="ghost" className="archive-action-button border-r border-[#111]" onClick={deleteActivePage}><Trash2 className="mr-2 h-4 w-4" />DELETE</Button><Button variant="ghost" className="archive-action-button" onClick={downloadDtms}><Download className="mr-2 h-4 w-4" />SAVE</Button></div></div></section>
 
-          <div className="order-3 space-y-4">{activeSourceSet && <section className="archive-card"><div className="archive-section-heading"><span>FOCUS</span><span className="truncate">{activeSourceSet.label}</span></div><FocusPicker source={activeSourceSet.source} crop={activeSourceSet.selectedCrop} onCommit={selectFocusCrop} /></section>}<aside className="archive-card"><div className="archive-section-heading"><span>SETTINGS</span></div><div className="p-3"><div className="grid grid-cols-2 gap-1"><button className={cn("archive-choice-button", mode === "edges" && "bg-[#111] text-white")} onClick={() => setMode("edges")}>EDGE</button><button className={cn("archive-choice-button", mode === "filled" && "bg-[#111] text-white")} onClick={() => setMode("filled")}>FILL</button></div><SettingSlider label="THRESHOLD" value={threshold} min={60} max={220} onChange={setThreshold} /><SettingSlider label="CLEANUP" value={simplification} min={0} max={3} onChange={setSimplification} /><div className="mt-5 flex items-center justify-between border-t border-[#111] pt-3"><Label htmlFor="invert-switch" className="archive-label">INVERT</Label><Switch id="invert-switch" checked={invert} onCheckedChange={setInvert} /></div><Button variant="ghost" className="archive-action-button mt-5 w-full border border-[#111]" onClick={regenerateAllPages} disabled={!sourceSets.length || isGenerating}>{isGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}REGENERATE</Button>{lastSavedAt && <Button variant="ghost" className="archive-action-button mt-2 w-full" onClick={clearTemporaryDraft}><Trash2 className="mr-2 h-4 w-4" />RESET DRAFT</Button>}<p aria-live="polite" className="sr-only">{status}</p></div></aside></div>
+          <div className="order-3 space-y-4">
+            {activeSourceSet && <section className="archive-card"><div className="archive-section-heading"><span>FOCUS</span><span className="truncate">{activeSourceSet.label}</span></div><FocusPicker source={activeSourceSet.source} crop={activeSourceSet.selectedCrop} onCommit={selectFocusCrop} /></section>}
+            <TactileSettingsPanel
+              activePage={activePage}
+              mode={mode}
+              threshold={threshold}
+              simplification={simplification}
+              invert={invert}
+              isGenerating={isGenerating}
+              hasSources={sourceSets.length > 0}
+              hasDraft={Boolean(lastSavedAt)}
+              onModeChange={setMode}
+              onThresholdChange={setThreshold}
+              onSimplificationChange={setSimplification}
+              onInvertChange={setInvert}
+              onDetailChange={(detailLevel) => updateTactileSettings({ detailLevel })}
+              onPatternChange={(pattern) => updateTactileSettings({ pattern })}
+              onRegenerate={regenerateAllPages}
+              onClearDraft={clearTemporaryDraft}
+            />
+            <p aria-live="polite" className="sr-only">{status}</p>
+          </div>
         </div>
 
         <footer className="mt-4 flex items-center justify-between border-t border-[#111] pt-3 text-[10px] uppercase tracking-[.08em] text-zinc-500"><span>local workspace</span><a className="font-medium text-[#111] underline underline-offset-4" href="https://dot.apps-dotincorp.com/canvas" target="_blank" rel="noreferrer">Dot Canvas <ArrowRight className="ml-1 inline h-3 w-3" /></a></footer>
       </main>
     </div>
   );
+}
+
+function TactileSettingsPanel({ activePage, mode, threshold, simplification, invert, isGenerating, hasSources, hasDraft, onModeChange, onThresholdChange, onSimplificationChange, onInvertChange, onDetailChange, onPatternChange, onRegenerate, onClearDraft }: {
+  activePage?: TactilePage;
+  mode: ConversionMode;
+  threshold: number;
+  simplification: number;
+  invert: boolean;
+  isGenerating: boolean;
+  hasSources: boolean;
+  hasDraft: boolean;
+  onModeChange: (mode: ConversionMode) => void;
+  onThresholdChange: (value: number) => void;
+  onSimplificationChange: (value: number) => void;
+  onInvertChange: (value: boolean) => void;
+  onDetailChange: (detail: DetailLevel) => void;
+  onPatternChange: (pattern: TactilePattern) => void;
+  onRegenerate: () => void;
+  onClearDraft: () => void;
+}) {
+  const automaticPage = Boolean(activePage?.source && activePage.kind !== "manual");
+  const detailLevel = activePage?.detailLevel ?? defaultDetailLevel(activePage?.kind ?? "manual");
+  const pattern = activePage?.pattern ?? defaultPattern(activePage?.kind ?? "manual");
+
+  return <aside className="archive-card">
+    <div className="archive-section-heading"><span>SETTINGS</span></div>
+    <div className="p-3">
+      {automaticPage && <>
+        <div className="flex items-center justify-between"><p className="archive-label">DETAIL</p><span className="text-[10px] text-zinc-500">{DETAIL_LEVELS.find((level) => level.id === detailLevel)?.description}</span></div>
+        <div className="mt-2 grid grid-cols-3 gap-1">
+          {DETAIL_LEVELS.map((level) => <button key={level.id} type="button" aria-pressed={detailLevel === level.id} disabled={isGenerating} className={cn("archive-choice-button", detailLevel === level.id && "archive-choice-active")} onClick={() => onDetailChange(level.id)}>{level.label}</button>)}
+        </div>
+        <div className="mt-5 flex items-center justify-between border-t border-[#111] pt-3"><p className="archive-label">PATTERN</p><span className="text-[10px] text-zinc-500">영역 채움</span></div>
+        <div className="mt-2 grid grid-cols-2 gap-1">
+          {TACTILE_PATTERNS.map((item) => <button key={item.id} type="button" aria-pressed={pattern === item.id} disabled={isGenerating} className={cn("tactile-pattern-button", pattern === item.id && "tactile-pattern-active")} onClick={() => onPatternChange(item.id)}><span className={cn("tactile-pattern-swatch", `tactile-pattern-${item.id}`)} aria-hidden="true" /><span>{item.label}</span></button>)}
+        </div>
+      </>}
+      <div className={cn(automaticPage && "mt-5 border-t border-[#111] pt-3")}>
+        <div className="grid grid-cols-2 gap-1"><button className={cn("archive-choice-button", mode === "edges" && "bg-[#111] text-white")} onClick={() => onModeChange("edges")}>EDGE</button><button className={cn("archive-choice-button", mode === "filled" && "bg-[#111] text-white")} onClick={() => onModeChange("filled")}>FILL</button></div>
+        <SettingSlider label="THRESHOLD" value={threshold} min={60} max={220} onChange={onThresholdChange} />
+        <SettingSlider label="CLEANUP" value={simplification} min={0} max={3} onChange={onSimplificationChange} />
+        <div className="mt-5 flex items-center justify-between border-t border-[#111] pt-3"><Label htmlFor="invert-switch" className="archive-label">INVERT</Label><Switch id="invert-switch" checked={invert} onCheckedChange={onInvertChange} /></div>
+        <Button variant="ghost" className="archive-action-button mt-5 w-full border border-[#111]" onClick={onRegenerate} disabled={!hasSources || isGenerating}>{isGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}REGENERATE</Button>
+        {hasDraft && <Button variant="ghost" className="archive-action-button mt-2 w-full" onClick={onClearDraft}><Trash2 className="mr-2 h-4 w-4" />RESET DRAFT</Button>}
+      </div>
+    </div>
+  </aside>;
 }
 
 function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; onCommit: (crop: Crop) => void }) {

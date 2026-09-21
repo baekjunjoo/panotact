@@ -60,7 +60,7 @@ type PageKind = "overall" | "structure" | "focus" | "manual";
 type DetailLevel = "form" | "structure" | "texture";
 type TactilePattern = "contour" | "dots" | "hatch" | "crosshatch";
 type Crop = { x: number; y: number; width: number; height: number; rotation: number };
-type FocusOutline = { points: Array<[number, number]>; crop: Crop };
+type FocusOutline = { points: Array<[number, number]>; crop: Crop; cutout: string };
 type FocusCandidate = { id: string; label: string; crop: Crop; score: number };
 type SourceInput = { source: string; label: string; documentId?: string; documentName?: string; documentOrder?: number; candidateOrder?: number; pdfPageNumber?: number; candidateIds?: string[] };
 type TextRegion = { x: number; y: number; width: number; height: number };
@@ -86,6 +86,7 @@ type SourceSet = SourceInput & {
   aspect: number;
   candidates: FocusCandidate[];
   selectedCrop: Crop;
+  focusCutout?: string;
 };
 type TactilePage = {
   id: string;
@@ -204,7 +205,7 @@ function constrainCrop(crop: Crop): Crop {
 }
 
 function outlineForPoint(source: HTMLImageElement, point: { x: number; y: number }): FocusOutline | null {
-  const longestSide = 480;
+  const longestSide = 640;
   const scale = Math.min(1, longestSide / Math.max(source.naturalWidth, source.naturalHeight));
   const width = Math.max(1, Math.round(source.naturalWidth * scale));
   const height = Math.max(1, Math.round(source.naturalHeight * scale));
@@ -220,17 +221,21 @@ function outlineForPoint(source: HTMLImageElement, point: { x: number; y: number
     const index = (y * width + x) * 4;
     return [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]] as const;
   };
-
+  const median = (values: number[]) => values.sort((left, right) => left - right)[Math.floor(values.length / 2)] ?? 255;
   const edgePixels: Array<readonly number[]> = [];
-  for (let x = 0; x < width; x += 4) { edgePixels.push(colorAt(x, 0), colorAt(x, height - 1)); }
-  for (let y = 0; y < height; y += 4) { edgePixels.push(colorAt(0, y), colorAt(width - 1, y)); }
-  const background = [0, 1, 2].map((channel) => edgePixels.map((color) => color[channel]).sort((left, right) => left - right)[Math.floor(edgePixels.length / 2)]) as [number, number, number];
+  for (let x = 0; x < width; x += 3) edgePixels.push(colorAt(x, 0), colorAt(x, height - 1));
+  for (let y = 0; y < height; y += 3) edgePixels.push(colorAt(0, y), colorAt(width - 1, y));
+  const background = [0, 1, 2].map((channel) => median(edgePixels.map((color) => color[channel]))) as [number, number, number];
+  const edgeDistances = edgePixels.map((color) => colorDistance(color, background)).sort((left, right) => left - right);
+  const edgeNoise = edgeDistances[Math.floor(edgeDistances.length * 0.84)] ?? 0;
+  const differenceLimit = clamp(edgeNoise * 2.2 + 8, 9, 34);
   const foreground = new Uint8Array(width * height);
+
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
       const color = colorAt(x, y);
-      const distance = Math.hypot(color[0] - background[0], color[1] - background[1], color[2] - background[2]);
-      foreground[y * width + x] = Number(color[3] > 20 && distance > 26);
+      const distance = colorDistance(color, background);
+      foreground[y * width + x] = Number(color[3] > 18 && distance > differenceLimit);
     }
   }
 
@@ -240,8 +245,9 @@ function outlineForPoint(source: HTMLImageElement, point: { x: number; y: number
   if (!foreground[start]) {
     let nearest = -1;
     let nearestDistance = Number.POSITIVE_INFINITY;
-    for (let y = Math.max(0, requestedY - 42); y <= Math.min(height - 1, requestedY + 42); y += 1) {
-      for (let x = Math.max(0, requestedX - 42); x <= Math.min(width - 1, requestedX + 42); x += 1) {
+    const searchRadius = Math.max(42, Math.round(Math.min(width, height) * 0.13));
+    for (let y = Math.max(0, requestedY - searchRadius); y <= Math.min(height - 1, requestedY + searchRadius); y += 1) {
+      for (let x = Math.max(0, requestedX - searchRadius); x <= Math.min(width - 1, requestedX + searchRadius); x += 1) {
         const index = y * width + x;
         const distance = (x - requestedX) ** 2 + (y - requestedY) ** 2;
         if (foreground[index] && distance < nearestDistance) { nearest = index; nearestDistance = distance; }
@@ -255,7 +261,7 @@ function outlineForPoint(source: HTMLImageElement, point: { x: number; y: number
   const contains = new Uint8Array(width * height);
   const queue: number[] = [start];
   visited[start] = 1;
-  const maxPixels = Math.floor(width * height * 0.72);
+  const maxPixels = Math.floor(width * height * 0.7);
   let count = 0;
   let minX = width;
   let maxX = 0;
@@ -314,12 +320,23 @@ function outlineForPoint(source: HTMLImageElement, point: { x: number; y: number
   }
   const boundary = longestLoop.filter((_, index) => index % 3 === 0).map(([x, y]) => [x / width, y / height] as [number, number]);
   if (boundary.length < 8) return null;
+
+  const cutout = document.createElement("canvas");
+  cutout.width = width;
+  cutout.height = height;
+  const cutoutContext = cutout.getContext("2d", { willReadFrequently: true });
+  if (!cutoutContext) return null;
+  const cutoutData = new ImageData(new Uint8ClampedArray(pixels), width, height);
+  for (let index = 0; index < width * height; index += 1) {
+    if (!contains[index]) cutoutData.data[index * 4 + 3] = 0;
+  }
+  cutoutContext.putImageData(cutoutData, 0, 0);
+
   const padX = Math.max(0.008, ((maxX - minX) / width) * 0.025);
   const padY = Math.max(0.008, ((maxY - minY) / height) * 0.025);
   const crop = constrainCrop({ x: minX / width - padX, y: minY / height - padY, width: (maxX - minX + 1) / width + padX * 2, height: (maxY - minY + 1) / height + padY * 2, rotation: 0 });
-  return { points: boundary, crop };
+  return { points: boundary, crop, cutout: cutout.toDataURL("image/png") };
 }
-
 function copySourceSet(sourceSet: SourceSet): SourceSet {
   return {
     ...sourceSet,
@@ -462,8 +479,7 @@ async function getImageDataFromSource(
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) throw new Error("Canvas를 시작할 수 없습니다.");
 
-  context.fillStyle = "white";
-  context.fillRect(0, 0, width, height);
+  context.clearRect(0, 0, width, height);
   context.save();
   context.translate(width / 2, height / 2);
   context.rotate((-crop.rotation * Math.PI) / 180);
@@ -1032,7 +1048,8 @@ export default function Home() {
     const currentPage = pages.find((page) => page.sourceKey === sourceSet.id && page.kind === kind);
     const detailLevel = currentPage?.detailLevel ?? defaultDetailLevel(kind);
     const pattern = currentPage?.pattern ?? defaultPattern(kind);
-    const grid = await gridFor(sourceSet.source, crop, kind, detailLevel, pattern);
+    const pageSource = kind === "focus" && sourceSet.focusCutout ? sourceSet.focusCutout : sourceSet.source;
+    const grid = await gridFor(pageSource, crop, kind, detailLevel, pattern);
     const info = pageInfo(kind);
     const altText =
       kind === "overall"
@@ -1046,7 +1063,7 @@ export default function Home() {
       altText,
       grid,
       kind,
-      source: sourceSet.source,
+      source: pageSource,
       sourceKey: sourceSet.id,
       crop,
       detailLevel,
@@ -1067,16 +1084,17 @@ export default function Home() {
     const requestId = ++focusRenderRef.current;
     try {
       const focusPage = pages.find((page) => page.sourceKey === sourceSet.id && page.kind === "focus");
-      const grid = await gridFor(sourceSet.source, sourceSet.selectedCrop, "focus", focusPage?.detailLevel ?? defaultDetailLevel("focus"), focusPage?.pattern ?? defaultPattern("focus"));
+      const focusSource = sourceSet.focusCutout ?? sourceSet.source;
+      const grid = await gridFor(focusSource, sourceSet.selectedCrop, "focus", focusPage?.detailLevel ?? defaultDetailLevel("focus"), focusPage?.pattern ?? defaultPattern("focus"));
       if (requestId !== focusRenderRef.current) return;
       setPages((current) =>
         current.map((page) =>
           page.sourceKey === sourceSet.id && page.kind === "focus"
-            ? { ...page, grid, crop: sourceSet.selectedCrop }
+            ? { ...page, grid, crop: sourceSet.selectedCrop, source: focusSource }
             : page,
         ),
       );
-      if (announce) setStatus("핵심 부위 확대 페이지를 선택한 영역으로 갱신했습니다.");
+      if (announce) setStatus("선택한 대상만 투명 마스크로 분리해 핵심 부위 확대 페이지에 적용했습니다.");
     } catch {
       if (announce) setStatus("핵심 부위 확대를 만들 수 없습니다. 다른 위치를 선택해 주세요.");
     }
@@ -1626,10 +1644,10 @@ export default function Home() {
     }
   }
 
-  function selectFocusCrop(crop: Crop) {
+  function selectFocusCrop(selection: Pick<FocusOutline, "crop" | "cutout">) {
     if (!activeSourceSet) return;
     recordHistory();
-    const updatedSet = { ...activeSourceSet, selectedCrop: constrainCrop(crop) };
+    const updatedSet = { ...activeSourceSet, selectedCrop: constrainCrop(selection.crop), focusCutout: selection.cutout };
     setSourceSets((current) => current.map((item) => (item.id === updatedSet.id ? updatedSet : item)));
     selectFocusCanvas(updatedSet);
     void refreshFocusPage(updatedSet);
@@ -1813,7 +1831,7 @@ function TactileSettingsPanel({ activePage, mode, threshold, simplification, inv
   </aside>;
 }
 
-function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; onCommit: (crop: Crop) => void }) {
+function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; onCommit: (selection: Pick<FocusOutline, "crop" | "cutout">) => void }) {
   const pickerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const [outline, setOutline] = useState<FocusOutline | null>(null);
@@ -1840,10 +1858,9 @@ function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; o
     const selected = point(event);
     const selectedOutline = imageRef.current ? outlineForPoint(imageRef.current, selected) : null;
     if (!selectedOutline) return;
-    const nextCrop = selectedOutline.crop;
     setOutline(selectedOutline);
     setSelectionId((current) => current + 1);
-    onCommit(nextCrop);
+    onCommit(selectedOutline);
   }
 
   function inspectImage(event: React.SyntheticEvent<HTMLImageElement>) {
@@ -1856,10 +1873,11 @@ function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; o
   return (
     <div className="focus-workspace">
       <div ref={pickerRef} role="button" tabIndex={0} aria-label="원본에서 확대할 대상을 클릭하면 대상의 외곽선이 선택되고 촉각 캔버스가 갱신됩니다." className="focus-picker focus-frame relative w-full cursor-crosshair overflow-hidden" style={{ aspectRatio: sourceAspect }} onPointerDown={choosePosition} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") choosePosition({ currentTarget: event.currentTarget, clientX: event.currentTarget.getBoundingClientRect().left + event.currentTarget.getBoundingClientRect().width / 2, clientY: event.currentTarget.getBoundingClientRect().top + event.currentTarget.getBoundingClientRect().height / 2 } as React.PointerEvent<HTMLDivElement>); }}>
-        <div className="absolute overflow-hidden bg-white" style={{ left: `${imageFrame.x * 100}%`, top: `${imageFrame.y * 100}%`, width: `${imageFrame.width * 100}%`, height: `${imageFrame.height * 100}%` }}>
-          <img ref={imageRef} className="h-full w-full select-none object-contain" src={source} alt="핵심 부위 선택용 원본 이미지" draggable={false} onLoad={inspectImage} />
+        <div className="absolute relative overflow-hidden bg-white" style={{ left: `${imageFrame.x * 100}%`, top: `${imageFrame.y * 100}%`, width: `${imageFrame.width * 100}%`, height: `${imageFrame.height * 100}%` }}>
+          <img ref={imageRef} className={cn("h-full w-full select-none object-contain transition-opacity duration-200", outline && "focus-source-muted")} src={source} alt="핵심 부위 선택용 원본 이미지" draggable={false} onLoad={inspectImage} />
+          {outline && <img className="pointer-events-none absolute inset-0 h-full w-full select-none object-contain focus-cutout-preview" src={outline.cutout} alt="" aria-hidden="true" draggable={false} />}
         </div>
-        {outline && <><svg key={selectionId} className="pointer-events-none absolute inset-0 z-10 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon className="focus-object-outline" points={points} /></svg><span key={`label-${selectionId}`} className="focus-object-label pointer-events-none absolute z-20 px-1.5 py-1 text-[9px] font-medium text-[#333]" style={{ left: `${(imageFrame.x + outline.crop.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + outline.crop.y * imageFrame.height) * 100}%` }}>FOCUS</span></>}
+        {outline && <><svg key={selectionId} className="pointer-events-none absolute inset-0 z-10 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon className="focus-object-outline" points={points} /></svg><span key={`label-${selectionId}`} className="focus-object-label pointer-events-none absolute z-20 px-1.5 py-1 text-[9px] font-medium text-[#333]" style={{ left: `${(imageFrame.x + outline.crop.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + outline.crop.y * imageFrame.height) * 100}%` }}>CUTOUT</span></>}
       </div>
     </div>
   );

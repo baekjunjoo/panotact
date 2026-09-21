@@ -41,6 +41,7 @@ import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { repairTactile, pageMetrics } from "@/lib/tactile";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -1041,6 +1042,9 @@ export default function Home() {
   const [mode, setMode] = useState<ConversionMode>("edges");
   const [simplification, setSimplification] = useState(1);
   const [invert, setInvert] = useState(false);
+  // 4-connectivity finish, ported from the DotPad engine: a fingertip cannot feel a diagonal-only join,
+  // so generated pages are bridged/pruned before they reach the reader. Hand edits are never touched.
+  const [tactileFinish, setTactileFinish] = useState(true);
   const [tool, setTool] = useState<"draw" | "erase">("draw");
   const [brushSize, setBrushSize] = useState(1);
   const [isLoading, setIsLoading] = useState(false);
@@ -1071,6 +1075,7 @@ export default function Home() {
     () => pages.find((page) => page.id === selectedId) ?? pages[0],
     [pages, selectedId],
   );
+  const activeMetrics = useMemo(() => (activePage ? pageMetrics(activePage.grid) : null), [activePage]);
   const activeSourceSet = useMemo(() => {
     const sourceKey = activePage?.sourceKey;
     return sourceSets.find((sourceSet) => sourceSet.id === sourceKey) ?? sourceSets[0];
@@ -1295,7 +1300,8 @@ export default function Home() {
     raw = applyTactilePattern(raw, imageData, pattern, detailLevel);
     const passes = detailLevel === "form" ? Math.max(1, simplification) : simplification;
     raw = simplifyGrid(raw, passes);
-    return invert ? raw.map((row) => row.map((value) => !value)) : raw;
+    const final = invert ? raw.map((row) => row.map((value) => !value)) : raw;
+    return tactileFinish ? repairTactile(final) : final;
   }
 
   async function makeAutoPage(sourceSet: SourceSet, kind: Exclude<PageKind, "manual">, includeSourceLabel: boolean): Promise<TactilePage> {
@@ -2007,7 +2013,7 @@ export default function Home() {
         <div className="grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)_minmax(0,1fr)]">
           <aside className="archive-card order-2 xl:order-1"><div className="archive-section-heading"><span>PAGES</span><span>{pages.length}</span></div><div className="divide-y divide-[#111]">{pages.map((page, index) => <button key={page.id} className={cn("flex w-full items-center gap-2 p-2 text-left transition hover:bg-[#f1f1f1]", page.id === selectedId && "bg-[#dfe5ff]")} onClick={() => setSelectedId(page.id)}><div className="grid h-10 w-14 shrink-0 place-items-center border border-[#111] bg-white"><MiniGrid grid={page.grid} /></div><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{page.title || `PAGE ${index + 1}`}</span><span className="text-[10px] text-zinc-500">{dotCount(page.grid)} dots</span></span></button>)}</div><div className="grid grid-cols-2 border-t border-[#111]"><Button variant="ghost" className="archive-action-button border-r border-[#111]" onClick={addBlankPage}><FilePlus2 className="mr-2 h-4 w-4" />NEW</Button><Button variant="ghost" className="archive-action-button" onClick={duplicatePage}><Layers3 className="mr-2 h-4 w-4" />COPY</Button></div></aside>
 
-          <section className="archive-card order-1 min-w-0 xl:order-2"><div className="archive-section-heading"><span>CANVAS</span><span>{pageInfo(activePage?.kind ?? "manual").title}</span><div className="ml-auto flex gap-1"><Button size="sm" variant="ghost" className={cn("archive-mini-button", tool === "draw" && "bg-[#111] text-white hover:bg-[#111] hover:text-white")} onClick={() => setTool("draw")}><MousePointer2 className="mr-1 h-3.5 w-3.5" />DRAW</Button><Button size="sm" variant="ghost" className={cn("archive-mini-button", tool === "erase" && "bg-[#111] text-white hover:bg-[#111] hover:text-white")} onClick={() => setTool("erase")}><Eraser className="mr-1 h-3.5 w-3.5" />ERASE</Button><Button size="sm" variant="ghost" aria-pressed={showCanvasReference} className={cn("archive-mini-button", showCanvasReference && "bg-[#111] text-white hover:bg-[#111] hover:text-white")} onClick={() => setShowCanvasReference((current) => !current)}><Eye className="mr-1 h-3.5 w-3.5" />REF</Button></div></div><div className="grid gap-3 p-3 2xl:grid-cols-[minmax(0,1fr)_150px]"><div className="border border-[#111] bg-[#f7f7f7] p-3 sm:p-4"><div role="application" aria-label="60 곱하기 40 촉각 점자 격자. 클릭하여 점을 편집합니다." className="tactile-grid mx-auto aspect-[3/2] w-full max-w-[760px] touch-none select-none bg-white p-[2.3%]" onPointerDown={handleGridPointerDown} onPointerMove={handleGridPointerMove} onPointerUp={() => setIsDrawing(false)} onPointerLeave={() => setIsDrawing(false)} onPointerCancel={() => setIsDrawing(false)}>{showCanvasReference && canvasReferenceSource && <span className="tactile-grid-reference" aria-hidden="true"><img src={canvasReferenceSource} alt="" style={{ width: `${100 / canvasReferenceCrop.width}%`, height: `${100 / canvasReferenceCrop.height}%`, left: `-${(canvasReferenceCrop.x / canvasReferenceCrop.width) * 100}%`, top: `-${(canvasReferenceCrop.y / canvasReferenceCrop.height) * 100}%` }} /></span>}{activePage?.grid.map((row, y) => row.map((raised, x) => <span key={`${x}-${y}`} className={cn("dot", raised && "dot-raised")} />))}</div><div className="mt-2 flex justify-between text-[10px] uppercase text-zinc-500"><span>60 × 40</span><span>{activePage ? dotCount(activePage.grid) : 0} dots</span></div></div><div className="flex flex-col gap-3"><div className="border border-[#111] p-2">{sourceImage ? <img className="aspect-[3/2] w-full object-contain" src={sourceImage} alt="업로드한 원본" /> : <div className="grid aspect-[3/2] place-items-center text-[10px] text-zinc-400">NO SOURCE</div>}</div><div className="grid grid-cols-2 gap-1">{[1, 3].map((size) => <button key={size} onClick={() => setBrushSize(size)} className={cn("archive-choice-button", brushSize === size && "bg-[#2f45ff] text-white")}>{size === 1 ? "1" : "3×3"}</button>)}</div><Button variant="ghost" className="archive-action-button border border-[#111]" onClick={resetActiveGrid}><RotateCcw className="mr-2 h-4 w-4" />CLEAR</Button></div></div><div className="grid border-t border-[#111] md:grid-cols-[1fr_auto]"><div className="grid gap-3 p-3 sm:grid-cols-2"><div><Label htmlFor="page-title" className="archive-label">TITLE</Label><Input id="page-title" className="archive-input mt-1" value={activePage?.title ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ title: event.target.value })} /></div><div><Label htmlFor="alt-text" className="archive-label">ALT</Label><Textarea id="alt-text" className="archive-input mt-1 min-h-10" value={activePage?.altText ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ altText: event.target.value })} /></div></div><div className="flex border-t border-[#111] md:border-l md:border-t-0"><Button variant="ghost" className="archive-action-button border-r border-[#111]" onClick={deleteActivePage}><Trash2 className="mr-2 h-4 w-4" />DELETE</Button><Button variant="ghost" className="archive-action-button" onClick={downloadDtms}><Download className="mr-2 h-4 w-4" />SAVE</Button></div></div></section>
+          <section className="archive-card order-1 min-w-0 xl:order-2"><div className="archive-section-heading"><span>CANVAS</span><span>{pageInfo(activePage?.kind ?? "manual").title}</span><div className="ml-auto flex gap-1"><Button size="sm" variant="ghost" className={cn("archive-mini-button", tool === "draw" && "bg-[#111] text-white hover:bg-[#111] hover:text-white")} onClick={() => setTool("draw")}><MousePointer2 className="mr-1 h-3.5 w-3.5" />DRAW</Button><Button size="sm" variant="ghost" className={cn("archive-mini-button", tool === "erase" && "bg-[#111] text-white hover:bg-[#111] hover:text-white")} onClick={() => setTool("erase")}><Eraser className="mr-1 h-3.5 w-3.5" />ERASE</Button><Button size="sm" variant="ghost" aria-pressed={showCanvasReference} className={cn("archive-mini-button", showCanvasReference && "bg-[#111] text-white hover:bg-[#111] hover:text-white")} onClick={() => setShowCanvasReference((current) => !current)}><Eye className="mr-1 h-3.5 w-3.5" />REF</Button></div></div><div className="grid gap-3 p-3 2xl:grid-cols-[minmax(0,1fr)_150px]"><div className="border border-[#111] bg-[#f7f7f7] p-3 sm:p-4"><div role="application" aria-label="60 곱하기 40 촉각 점자 격자. 클릭하여 점을 편집합니다." className="tactile-grid mx-auto aspect-[3/2] w-full max-w-[760px] touch-none select-none bg-white p-[2.3%]" onPointerDown={handleGridPointerDown} onPointerMove={handleGridPointerMove} onPointerUp={() => setIsDrawing(false)} onPointerLeave={() => setIsDrawing(false)} onPointerCancel={() => setIsDrawing(false)}>{showCanvasReference && canvasReferenceSource && <span className="tactile-grid-reference" aria-hidden="true"><img src={canvasReferenceSource} alt="" style={{ width: `${100 / canvasReferenceCrop.width}%`, height: `${100 / canvasReferenceCrop.height}%`, left: `-${(canvasReferenceCrop.x / canvasReferenceCrop.width) * 100}%`, top: `-${(canvasReferenceCrop.y / canvasReferenceCrop.height) * 100}%` }} /></span>}{activePage?.grid.map((row, y) => row.map((raised, x) => <span key={`${x}-${y}`} className={cn("dot", raised && "dot-raised")} />))}</div><div className="mt-2 flex justify-between text-[10px] uppercase text-zinc-500"><span>60 × 40</span><span>{activeMetrics ? `${activeMetrics.dots} dots · ${activeMetrics.cc4}조각 · ${activeMetrics.openMain ? "열림" : "닫힘"}` : "0 dots"}</span></div></div><div className="flex flex-col gap-3"><div className="border border-[#111] p-2">{sourceImage ? <img className="aspect-[3/2] w-full object-contain" src={sourceImage} alt="업로드한 원본" /> : <div className="grid aspect-[3/2] place-items-center text-[10px] text-zinc-400">NO SOURCE</div>}</div><div className="grid grid-cols-2 gap-1">{[1, 3].map((size) => <button key={size} onClick={() => setBrushSize(size)} className={cn("archive-choice-button", brushSize === size && "bg-[#2f45ff] text-white")}>{size === 1 ? "1" : "3×3"}</button>)}</div><Button variant="ghost" className="archive-action-button border border-[#111]" onClick={resetActiveGrid}><RotateCcw className="mr-2 h-4 w-4" />CLEAR</Button></div></div><div className="grid border-t border-[#111] md:grid-cols-[1fr_auto]"><div className="grid gap-3 p-3 sm:grid-cols-2"><div><Label htmlFor="page-title" className="archive-label">TITLE</Label><Input id="page-title" className="archive-input mt-1" value={activePage?.title ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ title: event.target.value })} /></div><div><Label htmlFor="alt-text" className="archive-label">ALT</Label><Textarea id="alt-text" className="archive-input mt-1 min-h-10" value={activePage?.altText ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ altText: event.target.value })} /></div></div><div className="flex border-t border-[#111] md:border-l md:border-t-0"><Button variant="ghost" className="archive-action-button border-r border-[#111]" onClick={deleteActivePage}><Trash2 className="mr-2 h-4 w-4" />DELETE</Button><Button variant="ghost" className="archive-action-button" onClick={downloadDtms}><Download className="mr-2 h-4 w-4" />SAVE</Button></div></div></section>
 
           <div className="order-3 space-y-4">
             {activeSourceSet && <section className="archive-card"><div className="archive-section-heading"><span>FOCUS</span><span className="truncate">{activeSourceSet.label}</span></div><FocusPicker source={activeSourceSet.source} crop={activeSourceSet.selectedCrop} onCommit={selectFocusCrop} onStatus={setStatus} /></section>}
@@ -2017,6 +2023,7 @@ export default function Home() {
               threshold={threshold}
               simplification={simplification}
               invert={invert}
+              tactileFinish={tactileFinish}
               isGenerating={isGenerating}
               hasSources={sourceSets.length > 0}
               hasDraft={Boolean(lastSavedAt)}
@@ -2024,6 +2031,7 @@ export default function Home() {
               onThresholdChange={setThreshold}
               onSimplificationChange={setSimplification}
               onInvertChange={setInvert}
+              onTactileFinishChange={setTactileFinish}
               onDetailChange={(detailLevel) => updateTactileSettings({ detailLevel })}
               onPatternChange={(pattern) => updateTactileSettings({ pattern })}
               onRegenerate={regenerateAllPages}
@@ -2039,12 +2047,13 @@ export default function Home() {
   );
 }
 
-function TactileSettingsPanel({ activePage, mode, threshold, simplification, invert, isGenerating, hasSources, hasDraft, onModeChange, onThresholdChange, onSimplificationChange, onInvertChange, onDetailChange, onPatternChange, onRegenerate, onClearDraft }: {
+function TactileSettingsPanel({ activePage, mode, threshold, simplification, invert, tactileFinish, isGenerating, hasSources, hasDraft, onModeChange, onThresholdChange, onSimplificationChange, onInvertChange, onTactileFinishChange, onDetailChange, onPatternChange, onRegenerate, onClearDraft }: {
   activePage?: TactilePage;
   mode: ConversionMode;
   threshold: number;
   simplification: number;
   invert: boolean;
+  tactileFinish: boolean;
   isGenerating: boolean;
   hasSources: boolean;
   hasDraft: boolean;
@@ -2052,6 +2061,7 @@ function TactileSettingsPanel({ activePage, mode, threshold, simplification, inv
   onThresholdChange: (value: number) => void;
   onSimplificationChange: (value: number) => void;
   onInvertChange: (value: boolean) => void;
+  onTactileFinishChange: (value: boolean) => void;
   onDetailChange: (detail: DetailLevel) => void;
   onPatternChange: (pattern: TactilePattern) => void;
   onRegenerate: () => void;
@@ -2079,6 +2089,7 @@ function TactileSettingsPanel({ activePage, mode, threshold, simplification, inv
         <SettingSlider label="THRESHOLD" value={threshold} min={60} max={220} onChange={onThresholdChange} />
         <SettingSlider label="CLEANUP" value={simplification} min={0} max={3} onChange={onSimplificationChange} />
         <div className="mt-5 flex items-center justify-between border-t border-[#111] pt-3"><Label htmlFor="invert-switch" className="archive-label">INVERT</Label><Switch id="invert-switch" checked={invert} onCheckedChange={onInvertChange} /></div>
+        <div className="mt-3 flex items-center justify-between"><span><Label htmlFor="finish-switch" className="archive-label">4-연결 마감</Label><span className="block text-[10px] text-zinc-500">대각선 이음을 손끝이 따라갈 수 있게 잌김</span></span><Switch id="finish-switch" checked={tactileFinish} onCheckedChange={onTactileFinishChange} /></div>
         <Button variant="ghost" className="archive-action-button mt-5 w-full border border-[#111]" onClick={onRegenerate} disabled={!hasSources || isGenerating}>{isGenerating ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}REGENERATE</Button>
         {hasDraft && <Button variant="ghost" className="archive-action-button mt-2 w-full" onClick={onClearDraft}><Trash2 className="mr-2 h-4 w-4" />RESET DRAFT</Button>}
       </div>

@@ -61,6 +61,9 @@ type DetailLevel = "form" | "structure" | "texture";
 type TactilePattern = "contour" | "dots" | "hatch" | "crosshatch";
 type Crop = { x: number; y: number; width: number; height: number; rotation: number };
 type FocusOutline = { points: Array<[number, number]>; crop: Crop; cutout: string };
+type FocusCandidateSelection = FocusOutline & { id: string; label: string; score: number };
+type FocusView = "silhouette" | "detail";
+type FocusTool = "select" | "add" | "erase" | "candidates";
 type FocusCandidate = { id: string; label: string; crop: Crop; score: number };
 type SourceInput = { source: string; label: string; documentId?: string; documentName?: string; documentOrder?: number; candidateOrder?: number; pdfPageNumber?: number; candidateIds?: string[] };
 type TextRegion = { x: number; y: number; width: number; height: number };
@@ -204,7 +207,10 @@ function constrainCrop(crop: Crop): Crop {
   };
 }
 
-function outlineForPoint(source: HTMLImageElement, point: { x: number; y: number }): FocusOutline | null {
+type FocusSegmentation = { width: number; height: number; pixels: Uint8ClampedArray; foreground: Uint8Array };
+type FocusComponent = { contains: Uint8Array; count: number; minX: number; maxX: number; minY: number; maxY: number };
+
+function createFocusSegmentation(source: HTMLImageElement): FocusSegmentation | null {
   const longestSide = 640;
   const scale = Math.min(1, longestSide / Math.max(source.naturalWidth, source.naturalHeight));
   const width = Math.max(1, Math.round(source.naturalWidth * scale));
@@ -215,8 +221,7 @@ function outlineForPoint(source: HTMLImageElement, point: { x: number; y: number
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) return null;
   context.drawImage(source, 0, 0, width, height);
-  const imageData = context.getImageData(0, 0, width, height);
-  const pixels = imageData.data;
+  const pixels = context.getImageData(0, 0, width, height).data;
   const colorAt = (x: number, y: number) => {
     const index = (y * width + x) * 4;
     return [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]] as const;
@@ -230,59 +235,65 @@ function outlineForPoint(source: HTMLImageElement, point: { x: number; y: number
   const edgeNoise = edgeDistances[Math.floor(edgeDistances.length * 0.84)] ?? 0;
   const differenceLimit = clamp(edgeNoise * 2.2 + 8, 9, 34);
   const foreground = new Uint8Array(width * height);
-
   for (let y = 0; y < height; y += 1) {
     for (let x = 0; x < width; x += 1) {
-      const color = colorAt(x, y);
-      const distance = colorDistance(color, background);
-      foreground[y * width + x] = Number(color[3] > 18 && distance > differenceLimit);
+      const index = (y * width + x) * 4;
+      const color = [pixels[index], pixels[index + 1], pixels[index + 2], pixels[index + 3]];
+      foreground[y * width + x] = Number(color[3] > 18 && colorDistance(color, background) > differenceLimit);
     }
   }
+  return { width, height, pixels, foreground };
+}
 
-  const requestedX = clamp(Math.round(point.x * (width - 1)), 0, width - 1);
-  const requestedY = clamp(Math.round(point.y * (height - 1)), 0, height - 1);
-  let start = requestedY * width + requestedX;
-  if (!foreground[start]) {
-    let nearest = -1;
-    let nearestDistance = Number.POSITIVE_INFINITY;
-    const searchRadius = Math.max(42, Math.round(Math.min(width, height) * 0.13));
-    for (let y = Math.max(0, requestedY - searchRadius); y <= Math.min(height - 1, requestedY + searchRadius); y += 1) {
-      for (let x = Math.max(0, requestedX - searchRadius); x <= Math.min(width - 1, requestedX + searchRadius); x += 1) {
-        const index = y * width + x;
-        const distance = (x - requestedX) ** 2 + (y - requestedY) ** 2;
-        if (foreground[index] && distance < nearestDistance) { nearest = index; nearestDistance = distance; }
-      }
-    }
-    if (nearest < 0) return null;
-    start = nearest;
-  }
-
-  const visited = new Uint8Array(width * height);
+function componentFromSeed(foreground: Uint8Array, width: number, height: number, start: number, visited?: Uint8Array): FocusComponent {
+  const claims = visited ?? new Uint8Array(width * height);
   const contains = new Uint8Array(width * height);
   const queue: number[] = [start];
-  visited[start] = 1;
-  const maxPixels = Math.floor(width * height * 0.7);
+  claims[start] = 1;
   let count = 0;
   let minX = width;
   let maxX = 0;
   let minY = height;
   let maxY = 0;
-
-  for (let queueIndex = 0; queueIndex < queue.length && count < maxPixels; queueIndex += 1) {
+  for (let queueIndex = 0; queueIndex < queue.length; queueIndex += 1) {
     const current = queue[queueIndex];
     const x = current % width;
     const y = Math.floor(current / width);
     contains[current] = 1;
     count += 1;
     minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
-    [[x + 1, y], [x - 1, y], [x, y + 1], [x, y - 1], [x + 1, y + 1], [x + 1, y - 1], [x - 1, y + 1], [x - 1, y - 1]].forEach(([nextX, nextY]) => {
-      if (nextX < 0 || nextY < 0 || nextX >= width || nextY >= height) return;
-      const next = nextY * width + nextX;
-      if (!visited[next] && foreground[next]) { visited[next] = 1; queue.push(next); }
-    });
+    for (let offsetY = -1; offsetY <= 1; offsetY += 1) {
+      for (let offsetX = -1; offsetX <= 1; offsetX += 1) {
+        if (offsetX === 0 && offsetY === 0) continue;
+        const nextX = x + offsetX;
+        const nextY = y + offsetY;
+        if (nextX < 0 || nextY < 0 || nextX >= width || nextY >= height) continue;
+        const next = nextY * width + nextX;
+        if (!claims[next] && foreground[next]) { claims[next] = 1; queue.push(next); }
+      }
+    }
   }
+  return { contains, count, minX, maxX, minY, maxY };
+}
 
-  if (count < 20 || count >= maxPixels || minX === width || minY === height) return null;
+function componentFromMask(contains: Uint8Array, width: number, height: number): FocusComponent | null {
+  let count = 0;
+  let minX = width;
+  let maxX = 0;
+  let minY = height;
+  let maxY = 0;
+  for (let index = 0; index < contains.length; index += 1) {
+    if (!contains[index]) continue;
+    const x = index % width;
+    const y = Math.floor(index / width);
+    count += 1;
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+  }
+  return count ? { contains, count, minX, maxX, minY, maxY } : null;
+}
+
+function focusOutlineFromComponent(pixels: Uint8ClampedArray, width: number, height: number, component: FocusComponent): FocusOutline | null {
+  const { contains, minX, maxX, minY, maxY } = component;
   type Edge = { from: [number, number]; to: [number, number] };
   const edges: Edge[] = [];
   const occupied = (x: number, y: number) => x >= 0 && y >= 0 && x < width && y < height && contains[y * width + x] === 1;
@@ -318,25 +329,136 @@ function outlineForPoint(source: HTMLImageElement, point: { x: number; y: number
     }
     if (loop.length > longestLoop.length) longestLoop = loop;
   }
-  const boundary = longestLoop.filter((_, index) => index % 3 === 0).map(([x, y]) => [x / width, y / height] as [number, number]);
-  if (boundary.length < 8) return null;
-
+  const points = longestLoop.filter((_, index) => index % 3 === 0).map(([x, y]) => [x / width, y / height] as [number, number]);
+  if (points.length < 8) return null;
   const cutout = document.createElement("canvas");
   cutout.width = width;
   cutout.height = height;
   const cutoutContext = cutout.getContext("2d", { willReadFrequently: true });
   if (!cutoutContext) return null;
   const cutoutData = new ImageData(new Uint8ClampedArray(pixels), width, height);
-  for (let index = 0; index < width * height; index += 1) {
-    if (!contains[index]) cutoutData.data[index * 4 + 3] = 0;
-  }
+  for (let index = 0; index < contains.length; index += 1) if (!contains[index]) cutoutData.data[index * 4 + 3] = 0;
   cutoutContext.putImageData(cutoutData, 0, 0);
-
   const padX = Math.max(0.008, ((maxX - minX) / width) * 0.025);
   const padY = Math.max(0.008, ((maxY - minY) / height) * 0.025);
   const crop = constrainCrop({ x: minX / width - padX, y: minY / height - padY, width: (maxX - minX + 1) / width + padX * 2, height: (maxY - minY + 1) / height + padY * 2, rotation: 0 });
-  return { points: boundary, crop, cutout: cutout.toDataURL("image/png") };
+  return { points, crop, cutout: cutout.toDataURL("image/png") };
 }
+
+function nearestForegroundIndex(segmentation: FocusSegmentation, point: { x: number; y: number }) {
+  const { foreground, width, height } = segmentation;
+  const requestedX = clamp(Math.round(point.x * (width - 1)), 0, width - 1);
+  const requestedY = clamp(Math.round(point.y * (height - 1)), 0, height - 1);
+  const direct = requestedY * width + requestedX;
+  if (foreground[direct]) return direct;
+  let nearest = -1;
+  let nearestDistance = Number.POSITIVE_INFINITY;
+  const searchRadius = Math.max(42, Math.round(Math.min(width, height) * 0.13));
+  for (let y = Math.max(0, requestedY - searchRadius); y <= Math.min(height - 1, requestedY + searchRadius); y += 1) {
+    for (let x = Math.max(0, requestedX - searchRadius); x <= Math.min(width - 1, requestedX + searchRadius); x += 1) {
+      const index = y * width + x;
+      const distance = (x - requestedX) ** 2 + (y - requestedY) ** 2;
+      if (foreground[index] && distance < nearestDistance) { nearest = index; nearestDistance = distance; }
+    }
+  }
+  return nearest;
+}
+
+function outlineForPoint(source: HTMLImageElement, point: { x: number; y: number }): FocusOutline | null {
+  const segmentation = createFocusSegmentation(source);
+  if (!segmentation) return null;
+  const start = nearestForegroundIndex(segmentation, point);
+  if (start < 0) return null;
+  const component = componentFromSeed(segmentation.foreground, segmentation.width, segmentation.height, start);
+  if (component.count < 20 || component.count >= segmentation.width * segmentation.height * 0.7) return null;
+  return focusOutlineFromComponent(segmentation.pixels, segmentation.width, segmentation.height, component);
+}
+
+function splitComponentByPeaks(component: FocusComponent, width: number, height: number): FocusComponent[] {
+  const componentWidth = component.maxX - component.minX + 1;
+  const componentHeight = component.maxY - component.minY + 1;
+  if (component.count < 180 || Math.min(componentWidth, componentHeight) < 24) return [component];
+  const distance = new Uint16Array(width * height);
+  for (let index = 0; index < distance.length; index += 1) distance[index] = component.contains[index] ? 30000 : 0;
+  for (let y = component.minY; y <= component.maxY; y += 1) {
+    for (let x = component.minX; x <= component.maxX; x += 1) {
+      const index = y * width + x;
+      if (!component.contains[index]) continue;
+      let value = distance[index];
+      if (x > 0) value = Math.min(value, distance[index - 1] + 3);
+      if (y > 0) value = Math.min(value, distance[index - width] + 3);
+      if (x > 0 && y > 0) value = Math.min(value, distance[index - width - 1] + 4);
+      if (x < width - 1 && y > 0) value = Math.min(value, distance[index - width + 1] + 4);
+      distance[index] = value;
+    }
+  }
+  for (let y = component.maxY; y >= component.minY; y -= 1) {
+    for (let x = component.maxX; x >= component.minX; x -= 1) {
+      const index = y * width + x;
+      if (!component.contains[index]) continue;
+      let value = distance[index];
+      if (x < width - 1) value = Math.min(value, distance[index + 1] + 3);
+      if (y < height - 1) value = Math.min(value, distance[index + width] + 3);
+      if (x < width - 1 && y < height - 1) value = Math.min(value, distance[index + width + 1] + 4);
+      if (x > 0 && y < height - 1) value = Math.min(value, distance[index + width - 1] + 4);
+      distance[index] = value;
+    }
+  }
+  const minimumPeak = Math.max(18, Math.round(Math.min(componentWidth, componentHeight) * 0.08 * 3));
+  const maxima: Array<{ x: number; y: number; value: number }> = [];
+  for (let y = component.minY + 2; y < component.maxY - 1; y += 1) {
+    for (let x = component.minX + 2; x < component.maxX - 1; x += 1) {
+      const index = y * width + x;
+      const value = distance[index];
+      if (!component.contains[index] || value < minimumPeak) continue;
+      let highest = true;
+      for (let offsetY = -2; offsetY <= 2 && highest; offsetY += 1) for (let offsetX = -2; offsetX <= 2; offsetX += 1) {
+        if (distance[(y + offsetY) * width + x + offsetX] > value) { highest = false; break; }
+      }
+      if (highest) maxima.push({ x, y, value });
+    }
+  }
+  const separation = Math.max(18, Math.min(componentWidth, componentHeight) * 0.24);
+  const seeds = maxima.sort((left, right) => right.value - left.value).reduce<Array<{ x: number; y: number }>>((selected, peak) => {
+    if (selected.length < 4 && selected.every((seed) => Math.hypot(seed.x - peak.x, seed.y - peak.y) >= separation)) selected.push(peak);
+    return selected;
+  }, []);
+  if (seeds.length < 2) return [component];
+  const partitions = seeds.map(() => new Uint8Array(width * height));
+  for (let y = component.minY; y <= component.maxY; y += 1) for (let x = component.minX; x <= component.maxX; x += 1) {
+    const index = y * width + x;
+    if (!component.contains[index]) continue;
+    let selected = 0;
+    let nearestDistance = Number.POSITIVE_INFINITY;
+    seeds.forEach((seed, seedIndex) => {
+      const distanceToSeed = (seed.x - x) ** 2 + (seed.y - y) ** 2;
+      if (distanceToSeed < nearestDistance) { selected = seedIndex; nearestDistance = distanceToSeed; }
+    });
+    partitions[selected][index] = 1;
+  }
+  const parts = partitions.map((mask) => componentFromMask(mask, width, height)).filter((part): part is FocusComponent => Boolean(part && part.count >= 40));
+  return parts.length > 1 ? parts : [component];
+}
+
+function focusCandidatesForSource(source: HTMLImageElement): FocusCandidateSelection[] {
+  const segmentation = createFocusSegmentation(source);
+  if (!segmentation) return [];
+  const { width, height, foreground, pixels } = segmentation;
+  const visited = new Uint8Array(width * height);
+  const candidates: FocusCandidateSelection[] = [];
+  const minimumArea = Math.max(45, Math.round(width * height * 0.001));
+  for (let index = 0; index < foreground.length; index += 1) {
+    if (!foreground[index] || visited[index]) continue;
+    const component = componentFromSeed(foreground, width, height, index, visited);
+    if (component.count < minimumArea || component.count >= width * height * 0.7) continue;
+    splitComponentByPeaks(component, width, height).forEach((part) => {
+      const outline = focusOutlineFromComponent(pixels, width, height, part);
+      if (outline) candidates.push({ ...outline, id: createId(), label: `OBJECT ${candidates.length + 1}`, score: part.count });
+    });
+  }
+  return candidates.sort((left, right) => left.crop.y - right.crop.y || left.crop.x - right.crop.x).slice(0, 8).map((candidate, index) => ({ ...candidate, label: `OBJECT ${index + 1}` }));
+}
+
 function copySourceSet(sourceSet: SourceSet): SourceSet {
   return {
     ...sourceSet,
@@ -1834,14 +1956,40 @@ function TactileSettingsPanel({ activePage, mode, threshold, simplification, inv
 function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; onCommit: (selection: Pick<FocusOutline, "crop" | "cutout">) => void }) {
   const pickerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
+  const maskCanvasRef = useRef<HTMLCanvasElement>(null);
+  const brushActiveRef = useRef(false);
   const [outline, setOutline] = useState<FocusOutline | null>(null);
+  const [candidates, setCandidates] = useState<FocusCandidateSelection[]>([]);
   const [selectionId, setSelectionId] = useState(0);
   const [sourceAspect, setSourceAspect] = useState(FOCUS_FRAME_RATIO);
+  const [view, setView] = useState<FocusView>("silhouette");
+  const [tool, setTool] = useState<FocusTool>("select");
+  const [brushSize, setBrushSize] = useState(12);
+  const [brushCursor, setBrushCursor] = useState<{ x: number; y: number } | null>(null);
   const imageFrame = useMemo(() => containedImageFrame(sourceAspect, sourceAspect), [sourceAspect]);
+  const isBrush = tool === "add" || tool === "erase";
 
   useEffect(() => {
     setOutline(null);
+    setCandidates([]);
+    setTool("select");
+    setBrushCursor(null);
   }, [source]);
+
+  useEffect(() => {
+    const canvas = maskCanvasRef.current;
+    if (!canvas || !outline) return;
+    const image = new Image();
+    image.onload = () => {
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.clearRect(0, 0, canvas.width, canvas.height);
+      context.drawImage(image, 0, 0);
+    };
+    image.src = outline.cutout;
+  }, [outline?.cutout]);
 
   function point(event: React.PointerEvent<HTMLElement>) {
     const bounds = pickerRef.current?.getBoundingClientRect();
@@ -1854,13 +2002,79 @@ function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; o
     };
   }
 
+  function commitSelection(next: FocusOutline) {
+    setOutline(next);
+    setCandidates([]);
+    setSelectionId((current) => current + 1);
+    setTool("select");
+    onCommit(next);
+  }
+
   function choosePosition(event: React.PointerEvent<HTMLDivElement>) {
     const selected = point(event);
     const selectedOutline = imageRef.current ? outlineForPoint(imageRef.current, selected) : null;
-    if (!selectedOutline) return;
-    setOutline(selectedOutline);
-    setSelectionId((current) => current + 1);
-    onCommit(selectedOutline);
+    if (selectedOutline) commitSelection(selectedOutline);
+  }
+
+  function openCandidates(event: React.MouseEvent<HTMLButtonElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    const nextCandidates = imageRef.current ? focusCandidatesForSource(imageRef.current) : [];
+    setCandidates(nextCandidates);
+    setTool("candidates");
+  }
+
+  function drawBrush(event: React.PointerEvent<HTMLDivElement>) {
+    if (!isBrush || !outline) return;
+    const canvas = maskCanvasRef.current;
+    const original = imageRef.current;
+    if (!canvas || !original || !canvas.width || !canvas.height) return;
+    const selected = point(event);
+    setBrushCursor(selected);
+    const x = selected.x * canvas.width;
+    const y = selected.y * canvas.height;
+    const radius = Math.max(3, Math.round((brushSize / 480) * Math.max(canvas.width, canvas.height)));
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.save();
+    context.beginPath();
+    context.arc(x, y, radius, 0, Math.PI * 2);
+    context.clip();
+    if (tool === "add") {
+      context.globalCompositeOperation = "source-over";
+      context.drawImage(original, 0, 0, canvas.width, canvas.height);
+    } else {
+      context.globalCompositeOperation = "destination-out";
+      context.fillStyle = "#000";
+      context.fillRect(0, 0, canvas.width, canvas.height);
+    }
+    context.restore();
+  }
+
+  function beginBrush(event: React.PointerEvent<HTMLDivElement>) {
+    if (!isBrush || !outline) return;
+    event.preventDefault();
+    brushActiveRef.current = true;
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* Browser pointer capture is optional. */ }
+    drawBrush(event);
+  }
+
+  function finishBrush() {
+    if (!brushActiveRef.current || !outline) return;
+    brushActiveRef.current = false;
+    setBrushCursor(null);
+    const canvas = maskCanvasRef.current;
+    if (!canvas) return;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) return;
+    const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
+    const contains = new Uint8Array(canvas.width * canvas.height);
+    for (let index = 0; index < contains.length; index += 1) contains[index] = Number(imageData.data[index * 4 + 3] > 20);
+    const editedComponent = componentFromMask(contains, canvas.width, canvas.height);
+    const next = editedComponent ? focusOutlineFromComponent(imageData.data, canvas.width, canvas.height, editedComponent) : { ...outline, cutout: canvas.toDataURL("image/png") };
+    if (!next) return;
+    setOutline(next);
+    onCommit(next);
   }
 
   function inspectImage(event: React.SyntheticEvent<HTMLImageElement>) {
@@ -1869,20 +2083,35 @@ function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; o
   }
 
   const points = outline?.points.map(([x, y]) => `${(imageFrame.x + x * imageFrame.width) * 100},${(imageFrame.y + y * imageFrame.height) * 100}`).join(" ") ?? "";
+  const brushDiameter = outline && maskCanvasRef.current?.width ? (brushSize / maskCanvasRef.current.width) * imageFrame.width * 200 : 3;
 
   return (
     <div className="focus-workspace">
-      <div ref={pickerRef} role="button" tabIndex={0} aria-label="원본에서 확대할 대상을 클릭하면 대상의 외곽선이 선택되고 촉각 캔버스가 갱신됩니다." className="focus-picker focus-frame relative w-full cursor-crosshair overflow-hidden" style={{ aspectRatio: sourceAspect }} onPointerDown={choosePosition} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") choosePosition({ currentTarget: event.currentTarget, clientX: event.currentTarget.getBoundingClientRect().left + event.currentTarget.getBoundingClientRect().width / 2, clientY: event.currentTarget.getBoundingClientRect().top + event.currentTarget.getBoundingClientRect().height / 2 } as React.PointerEvent<HTMLDivElement>); }}>
+      <div className="focus-toolbar" role="toolbar" aria-label="핵심 부위 선택 도구">
+        <button type="button" className={cn("focus-tool-button", view === "silhouette" && "focus-tool-active")} aria-pressed={view === "silhouette"} onPointerDown={(event) => event.stopPropagation()} onClick={() => setView("silhouette")}>SIL</button>
+        <button type="button" className={cn("focus-tool-button", view === "detail" && "focus-tool-active")} aria-pressed={view === "detail"} onPointerDown={(event) => event.stopPropagation()} onClick={() => setView("detail")}>DETAIL</button>
+        <span className="focus-tool-divider" aria-hidden="true" />
+        <button type="button" className={cn("focus-tool-button", tool === "select" && "focus-tool-active")} aria-pressed={tool === "select"} onPointerDown={(event) => event.stopPropagation()} onClick={() => { setTool("select"); setCandidates([]); }}>SELECT</button>
+        <button type="button" className={cn("focus-tool-button", tool === "add" && "focus-tool-active")} aria-pressed={tool === "add"} disabled={!outline} onPointerDown={(event) => event.stopPropagation()} onClick={() => setTool("add")}>ADD</button>
+        <button type="button" className={cn("focus-tool-button", tool === "erase" && "focus-tool-active")} aria-pressed={tool === "erase"} disabled={!outline} onPointerDown={(event) => event.stopPropagation()} onClick={() => setTool("erase")}>CUT</button>
+        <button type="button" className={cn("focus-tool-button", tool === "candidates" && "focus-tool-active")} onPointerDown={(event) => event.stopPropagation()} onClick={openCandidates}>OBJECTS</button>
+      </div>
+      {isBrush && <div className="focus-brush-sizes" role="group" aria-label="마스크 브러시 크기"><button type="button" className={cn("focus-tool-button", brushSize === 7 && "focus-tool-active")} onClick={() => setBrushSize(7)}>S</button><button type="button" className={cn("focus-tool-button", brushSize === 12 && "focus-tool-active")} onClick={() => setBrushSize(12)}>M</button><button type="button" className={cn("focus-tool-button", brushSize === 20 && "focus-tool-active")} onClick={() => setBrushSize(20)}>L</button></div>}
+      <div ref={pickerRef} role="button" tabIndex={0} aria-label="원본에서 확대할 대상을 클릭하면 대상의 외곽선이 선택되고 촉각 캔버스가 갱신됩니다." data-view={view} data-tool={tool} className={cn("focus-picker focus-frame relative w-full overflow-hidden", isBrush ? "cursor-none" : "cursor-crosshair")} style={{ aspectRatio: sourceAspect }} onPointerDown={(event) => { if (tool === "select") choosePosition(event); else if (isBrush) beginBrush(event); }} onPointerMove={(event) => { if (isBrush) { if (brushActiveRef.current) drawBrush(event); else setBrushCursor(point(event)); } }} onPointerUp={finishBrush} onPointerLeave={() => { if (!brushActiveRef.current) setBrushCursor(null); }} onPointerCancel={finishBrush} onKeyDown={(event) => { if ((event.key === "Enter" || event.key === " ") && tool === "select") choosePosition({ currentTarget: event.currentTarget, clientX: event.currentTarget.getBoundingClientRect().left + event.currentTarget.getBoundingClientRect().width / 2, clientY: event.currentTarget.getBoundingClientRect().top + event.currentTarget.getBoundingClientRect().height / 2 } as React.PointerEvent<HTMLDivElement>); }}>
         <div className="absolute relative overflow-hidden bg-white" style={{ left: `${imageFrame.x * 100}%`, top: `${imageFrame.y * 100}%`, width: `${imageFrame.width * 100}%`, height: `${imageFrame.height * 100}%` }}>
           <img ref={imageRef} className={cn("h-full w-full select-none object-contain transition-opacity duration-200", outline && "focus-source-muted")} src={source} alt="핵심 부위 선택용 원본 이미지" draggable={false} onLoad={inspectImage} />
-          {outline && <img className="pointer-events-none absolute inset-0 h-full w-full select-none object-contain focus-cutout-preview" src={outline.cutout} alt="" aria-hidden="true" draggable={false} />}
+          {outline && <canvas ref={maskCanvasRef} className="pointer-events-none absolute inset-0 h-full w-full select-none focus-cutout-preview" aria-hidden="true" />}
         </div>
-        {outline && <><svg key={selectionId} className="pointer-events-none absolute inset-0 z-10 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon className="focus-object-outline" points={points} /></svg><span key={`label-${selectionId}`} className="focus-object-label pointer-events-none absolute z-20 px-1.5 py-1 text-[9px] font-medium text-[#333]" style={{ left: `${(imageFrame.x + outline.crop.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + outline.crop.y * imageFrame.height) * 100}%` }}>CUTOUT</span></>}
+        {outline && <svg key={selectionId} className="pointer-events-none absolute inset-0 z-10 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon className="focus-object-outline" points={points} /></svg>}
+        {candidates.length > 0 && <svg className="absolute inset-0 z-20 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label={`${candidates.length}개의 객체 후보`}><title>분리된 객체 후보</title>{candidates.map((candidate, index) => { const candidatePoints = candidate.points.map(([x, y]) => `${(imageFrame.x + x * imageFrame.width) * 100},${(imageFrame.y + y * imageFrame.height) * 100}`).join(" "); return <polygon key={candidate.id} className="focus-candidate-outline" points={candidatePoints} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); commitSelection(candidate); }} />; })}</svg>}
+        {candidates.map((candidate, index) => <button key={`label-${candidate.id}`} type="button" className="focus-candidate-label absolute z-30" style={{ left: `${(imageFrame.x + candidate.crop.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + candidate.crop.y * imageFrame.height) * 100}%` }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); commitSelection(candidate); }}>{String(index + 1).padStart(2, "0")}</button>)}
+        {outline && <span key={`label-${selectionId}`} className="focus-object-label pointer-events-none absolute z-30 px-1.5 py-1 text-[9px] font-medium text-[#333]" style={{ left: `${(imageFrame.x + outline.crop.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + outline.crop.y * imageFrame.height) * 100}%` }}>CUTOUT</span>}
+        {isBrush && brushCursor && <span className="focus-brush-cursor pointer-events-none absolute z-40" style={{ left: `${(imageFrame.x + brushCursor.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + brushCursor.y * imageFrame.height) * 100}%`, width: `${brushDiameter}%`, aspectRatio: "1", transform: "translate(-50%, -50%)" }} />}
       </div>
+      {tool === "candidates" && <p className="focus-tool-status" aria-live="polite">{candidates.length ? `${candidates.length} OBJECTS — 하나를 선택` : "객체 후보를 찾지 못했습니다. SELECT로 직접 선택하거나 CUT으로 경계를 분리하세요."}</p>}
     </div>
   );
 }
-
 function CandidateBoundaryEditor({ source, crop, textRegions, showTextOverlay, documentLabel, detection, onCommit }: { source: string; crop: Crop; textRegions: TextRegion[]; showTextOverlay: boolean; documentLabel: string; detection: PdfFigureCandidate["detection"]; onCommit: (crop: Crop) => void }) {
   type CandidateInteraction = { type: "move" | "resize"; handle?: "nw" | "ne" | "se" | "sw"; startX: number; startY: number; origin: Crop };
   const editorRef = useRef<HTMLDivElement>(null);

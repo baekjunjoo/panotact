@@ -1,5 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import * as pdfjsLib from "pdfjs-dist";
+import type * as ort from "onnxruntime-web";
 import {
   ArrowRight,
   BookOpen,
@@ -54,6 +55,14 @@ const CANDIDATE_FRAME_RATIO = 4 / 3;
 const FULL_CROP = { x: 0, y: 0, width: 1, height: 1, rotation: 0 };
 const EMPTY_GRID = () => Array.from({ length: GRID_HEIGHT }, () => Array(GRID_WIDTH).fill(false));
 const imageLoadCache = new Map<string, Promise<HTMLImageElement>>();
+const MOBILE_SAM_WIDTH = 1024;
+const MOBILE_SAM_HEIGHT = 684;
+const MOBILE_SAM_ENCODER_URL = "https://huggingface.co/spaces/Akbartus/projects/resolve/main/mobilesam.encoder.onnx";
+const MOBILE_SAM_DECODER_URL = "https://cdn.jsdelivr.net/gh/akbartus/MobileSAM-in-the-Browser@main/models/mobilesam.decoder.quant.onnx";
+let onnxRuntimePromise: Promise<typeof import("onnxruntime-web")> | null = null;
+let mobileSamEncoderSession: Promise<ort.InferenceSession> | null = null;
+let mobileSamDecoderSession: Promise<ort.InferenceSession> | null = null;
+const mobileSamEmbeddingCache = new Map<string, Promise<{ embedding: ort.Tensor; source: HTMLImageElement }>>();
 
 type ConversionMode = "edges" | "filled";
 type PageKind = "overall" | "structure" | "focus" | "manual";
@@ -63,7 +72,8 @@ type Crop = { x: number; y: number; width: number; height: number; rotation: num
 type FocusOutline = { points: Array<[number, number]>; crop: Crop; cutout: string };
 type FocusCandidateSelection = FocusOutline & { id: string; label: string; score: number };
 type FocusView = "silhouette" | "detail";
-type FocusTool = "select" | "add" | "erase" | "candidates";
+type FocusTool = "select" | "frame" | "add" | "erase" | "candidates";
+type SelectionFrame = { x: number; y: number; width: number; height: number };
 type FocusCandidate = { id: string; label: string; crop: Crop; score: number };
 type SourceInput = { source: string; label: string; documentId?: string; documentName?: string; documentOrder?: number; candidateOrder?: number; pdfPageNumber?: number; candidateIds?: string[] };
 type TextRegion = { x: number; y: number; width: number; height: number };
@@ -364,9 +374,25 @@ function nearestForegroundIndex(segmentation: FocusSegmentation, point: { x: num
   return nearest;
 }
 
-function outlineForPoint(source: HTMLImageElement, point: { x: number; y: number }): FocusOutline | null {
+function restrictSegmentationToFrame(segmentation: FocusSegmentation, selectionFrame?: SelectionFrame | null) {
+  if (!selectionFrame) return segmentation;
+  const { width, height, foreground } = segmentation;
+  const left = Math.floor(selectionFrame.x * width);
+  const right = Math.ceil((selectionFrame.x + selectionFrame.width) * width);
+  const top = Math.floor(selectionFrame.y * height);
+  const bottom = Math.ceil((selectionFrame.y + selectionFrame.height) * height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (x < left || x >= right || y < top || y >= bottom) foreground[y * width + x] = 0;
+    }
+  }
+  return segmentation;
+}
+
+function outlineForPoint(source: HTMLImageElement, point: { x: number; y: number }, selectionFrame?: SelectionFrame | null): FocusOutline | null {
   const segmentation = createFocusSegmentation(source);
   if (!segmentation) return null;
+  restrictSegmentationToFrame(segmentation, selectionFrame);
   const start = nearestForegroundIndex(segmentation, point);
   if (start < 0) return null;
   const component = componentFromSeed(segmentation.foreground, segmentation.width, segmentation.height, start);
@@ -440,9 +466,10 @@ function splitComponentByPeaks(component: FocusComponent, width: number, height:
   return parts.length > 1 ? parts : [component];
 }
 
-function focusCandidatesForSource(source: HTMLImageElement): FocusCandidateSelection[] {
+function focusCandidatesForSource(source: HTMLImageElement, selectionFrame?: SelectionFrame | null): FocusCandidateSelection[] {
   const segmentation = createFocusSegmentation(source);
   if (!segmentation) return [];
+  restrictSegmentationToFrame(segmentation, selectionFrame);
   const { width, height, foreground, pixels } = segmentation;
   const visited = new Uint8Array(width * height);
   const candidates: FocusCandidateSelection[] = [];
@@ -457,6 +484,109 @@ function focusCandidatesForSource(source: HTMLImageElement): FocusCandidateSelec
     });
   }
   return candidates.sort((left, right) => left.crop.y - right.crop.y || left.crop.x - right.crop.x).slice(0, 8).map((candidate, index) => ({ ...candidate, label: `OBJECT ${index + 1}` }));
+}
+
+function normalizeSelectionFrame(start: { x: number; y: number }, end: { x: number; y: number }): SelectionFrame {
+  const x = clamp(Math.min(start.x, end.x), 0, 1);
+  const y = clamp(Math.min(start.y, end.y), 0, 1);
+  const width = clamp(Math.abs(end.x - start.x), 0.08, 1 - x);
+  const height = clamp(Math.abs(end.y - start.y), 0.08, 1 - y);
+  return { x, y, width, height };
+}
+
+async function getOnnxRuntime() {
+  if (!onnxRuntimePromise) onnxRuntimePromise = import("onnxruntime-web");
+  const ortRuntime = await onnxRuntimePromise;
+  ortRuntime.env.wasm.wasmPaths = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/";
+  return ortRuntime;
+}
+
+async function getMobileSamEmbedding(source: string) {
+  const cached = mobileSamEmbeddingCache.get(source);
+  if (cached) return cached;
+  const task = (async () => {
+    const image = await loadImage(source);
+    const canvas = document.createElement("canvas");
+    canvas.width = MOBILE_SAM_WIDTH;
+    canvas.height = MOBILE_SAM_HEIGHT;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    if (!context) throw new Error("AI 분석용 캔버스를 만들 수 없습니다.");
+    context.drawImage(image, 0, 0, MOBILE_SAM_WIDTH, MOBILE_SAM_HEIGHT);
+    const rgba = context.getImageData(0, 0, MOBILE_SAM_WIDTH, MOBILE_SAM_HEIGHT).data;
+    const input = new Float32Array(MOBILE_SAM_WIDTH * MOBILE_SAM_HEIGHT * 3);
+    for (let pixelIndex = 0, inputIndex = 0; pixelIndex < rgba.length; pixelIndex += 4) {
+      input[inputIndex++] = rgba[pixelIndex];
+      input[inputIndex++] = rgba[pixelIndex + 1];
+      input[inputIndex++] = rgba[pixelIndex + 2];
+    }
+    const ortRuntime = await getOnnxRuntime();
+    ortRuntime.env.wasm.numThreads = 1;
+    if (!mobileSamEncoderSession) mobileSamEncoderSession = ortRuntime.InferenceSession.create(MOBILE_SAM_ENCODER_URL);
+    const encoder = await mobileSamEncoderSession;
+    const feeds: Record<string, ort.Tensor> = { [encoder.inputNames[0]]: new ortRuntime.Tensor(input, [MOBILE_SAM_HEIGHT, MOBILE_SAM_WIDTH, 3]) };
+    const result = await encoder.run(feeds);
+    const embedding = result.image_embeddings ?? result[encoder.outputNames[0]];
+    if (!embedding) throw new Error("AI 임베딩을 읽을 수 없습니다.");
+    return { embedding, source: image };
+  })();
+  mobileSamEmbeddingCache.set(source, task);
+  try {
+    return await task;
+  } catch (error) {
+    mobileSamEmbeddingCache.delete(source);
+    throw error;
+  }
+}
+
+async function aiOutlineForPoint(source: string, point: { x: number; y: number }, selectionFrame?: SelectionFrame | null): Promise<FocusOutline | null> {
+  const { embedding, source: image } = await getMobileSamEmbedding(source);
+  const ortRuntime = await getOnnxRuntime();
+  ortRuntime.env.wasm.numThreads = 1;
+  if (!mobileSamDecoderSession) mobileSamDecoderSession = ortRuntime.InferenceSession.create(MOBILE_SAM_DECODER_URL);
+  const decoder = await mobileSamDecoderSession;
+  const pointCoords = new ortRuntime.Tensor(new Float32Array([point.x * MOBILE_SAM_WIDTH, point.y * MOBILE_SAM_HEIGHT, 0, 0]), [1, 2, 2]);
+  const pointLabels = new ortRuntime.Tensor(new Float32Array([1, -1]), [1, 2]);
+  const maskInput = new ortRuntime.Tensor(new Float32Array(256 * 256), [1, 1, 256, 256]);
+  const hasMask = new ortRuntime.Tensor(new Float32Array([0]), [1]);
+  const originalImageSize = new ortRuntime.Tensor(new Float32Array([MOBILE_SAM_HEIGHT, MOBILE_SAM_WIDTH]), [2]);
+  const feeds: Record<string, ort.Tensor> = {
+    image_embeddings: embedding,
+    point_coords: pointCoords,
+    point_labels: pointLabels,
+    mask_input: maskInput,
+    has_mask_input: hasMask,
+    orig_im_size: originalImageSize,
+  };
+  const result = await decoder.run(feeds);
+  const mask = result.masks ?? result[decoder.outputNames[0]];
+  if (!mask || mask.dims.length < 4) throw new Error("AI 마스크를 읽을 수 없습니다.");
+  const maskValues = mask.data as Float32Array;
+  const maskHeight = Number(mask.dims[mask.dims.length - 2]);
+  const maskWidth = Number(mask.dims[mask.dims.length - 1]);
+  const scale = Math.min(1, 640 / Math.max(image.naturalWidth, image.naturalHeight));
+  const width = Math.max(1, Math.round(image.naturalWidth * scale));
+  const height = Math.max(1, Math.round(image.naturalHeight * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return null;
+  context.drawImage(image, 0, 0, width, height);
+  const imageData = context.getImageData(0, 0, width, height);
+  const contains = new Uint8Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const normalizedX = (x + 0.5) / width;
+      const normalizedY = (y + 0.5) / height;
+      const withinFrame = !selectionFrame || (normalizedX >= selectionFrame.x && normalizedX <= selectionFrame.x + selectionFrame.width && normalizedY >= selectionFrame.y && normalizedY <= selectionFrame.y + selectionFrame.height);
+      const sampleX = clamp(Math.floor(normalizedX * maskWidth), 0, maskWidth - 1);
+      const sampleY = clamp(Math.floor(normalizedY * maskHeight), 0, maskHeight - 1);
+      contains[y * width + x] = Number(withinFrame && maskValues[sampleY * maskWidth + sampleX] > 0);
+    }
+  }
+  const component = componentFromMask(contains, width, height);
+  if (!component || component.count < 20 || component.count >= width * height * 0.7) return null;
+  return focusOutlineFromComponent(imageData.data, width, height, component);
 }
 
 function copySourceSet(sourceSet: SourceSet): SourceSet {
@@ -926,6 +1056,7 @@ export default function Home() {
   const [draggedDocumentId, setDraggedDocumentId] = useState<string | null>(null);
   const [draggedCandidateId, setDraggedCandidateId] = useState<string | null>(null);
   const [showTextOverlay, setShowTextOverlay] = useState(false);
+  const [showCanvasReference, setShowCanvasReference] = useState(true);
   const [autosaveReady, setAutosaveReady] = useState(false);
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
   const [isSavingDraft, setIsSavingDraft] = useState(false);
@@ -945,6 +1076,8 @@ export default function Home() {
     return sourceSets.find((sourceSet) => sourceSet.id === sourceKey) ?? sourceSets[0];
   }, [activePage?.sourceKey, sourceSets]);
   const sourceImage = activePage?.source ?? activeSourceSet?.source;
+  const canvasReferenceSource = activePage?.source ?? activeSourceSet?.source;
+  const canvasReferenceCrop = activePage?.crop ?? FULL_CROP;
   const savedLabel = lastSavedAt ? `임시 저장됨 · ${new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit" }).format(lastSavedAt)}` : "자동 임시 저장 준비됨";
   const orderedDocuments = useMemo(() => [...batchDocuments].sort((left, right) => left.order - right.order), [batchDocuments]);
   const orderedCandidates = useMemo(() => [...pdfCandidates].sort((left, right) => left.documentOrder - right.documentOrder || left.candidateOrder - right.candidateOrder), [pdfCandidates]);
@@ -1874,10 +2007,10 @@ export default function Home() {
         <div className="grid gap-4 xl:grid-cols-[220px_minmax(0,1fr)_minmax(0,1fr)]">
           <aside className="archive-card order-2 xl:order-1"><div className="archive-section-heading"><span>PAGES</span><span>{pages.length}</span></div><div className="divide-y divide-[#111]">{pages.map((page, index) => <button key={page.id} className={cn("flex w-full items-center gap-2 p-2 text-left transition hover:bg-[#f1f1f1]", page.id === selectedId && "bg-[#dfe5ff]")} onClick={() => setSelectedId(page.id)}><div className="grid h-10 w-14 shrink-0 place-items-center border border-[#111] bg-white"><MiniGrid grid={page.grid} /></div><span className="min-w-0 flex-1"><span className="block truncate text-xs font-medium">{page.title || `PAGE ${index + 1}`}</span><span className="text-[10px] text-zinc-500">{dotCount(page.grid)} dots</span></span></button>)}</div><div className="grid grid-cols-2 border-t border-[#111]"><Button variant="ghost" className="archive-action-button border-r border-[#111]" onClick={addBlankPage}><FilePlus2 className="mr-2 h-4 w-4" />NEW</Button><Button variant="ghost" className="archive-action-button" onClick={duplicatePage}><Layers3 className="mr-2 h-4 w-4" />COPY</Button></div></aside>
 
-          <section className="archive-card order-1 min-w-0 xl:order-2"><div className="archive-section-heading"><span>CANVAS</span><span>{pageInfo(activePage?.kind ?? "manual").title}</span><div className="ml-auto flex gap-1"><Button size="sm" variant="ghost" className={cn("archive-mini-button", tool === "draw" && "bg-[#111] text-white hover:bg-[#111] hover:text-white")} onClick={() => setTool("draw")}><MousePointer2 className="mr-1 h-3.5 w-3.5" />DRAW</Button><Button size="sm" variant="ghost" className={cn("archive-mini-button", tool === "erase" && "bg-[#111] text-white hover:bg-[#111] hover:text-white")} onClick={() => setTool("erase")}><Eraser className="mr-1 h-3.5 w-3.5" />ERASE</Button></div></div><div className="grid gap-3 p-3 2xl:grid-cols-[minmax(0,1fr)_150px]"><div className="border border-[#111] bg-[#f7f7f7] p-3 sm:p-4"><div role="application" aria-label="60 곱하기 40 촉각 점자 격자. 클릭하여 점을 편집합니다." className="tactile-grid mx-auto aspect-[3/2] w-full max-w-[760px] touch-none select-none bg-white p-[2.3%]" onPointerDown={handleGridPointerDown} onPointerMove={handleGridPointerMove} onPointerUp={() => setIsDrawing(false)} onPointerLeave={() => setIsDrawing(false)} onPointerCancel={() => setIsDrawing(false)}>{activePage?.grid.map((row, y) => row.map((raised, x) => <span key={`${x}-${y}`} className={cn("dot", raised && "dot-raised")} />))}</div><div className="mt-2 flex justify-between text-[10px] uppercase text-zinc-500"><span>60 × 40</span><span>{activePage ? dotCount(activePage.grid) : 0} dots</span></div></div><div className="flex flex-col gap-3"><div className="border border-[#111] p-2">{sourceImage ? <img className="aspect-[3/2] w-full object-contain" src={sourceImage} alt="업로드한 원본" /> : <div className="grid aspect-[3/2] place-items-center text-[10px] text-zinc-400">NO SOURCE</div>}</div><div className="grid grid-cols-2 gap-1">{[1, 3].map((size) => <button key={size} onClick={() => setBrushSize(size)} className={cn("archive-choice-button", brushSize === size && "bg-[#2f45ff] text-white")}>{size === 1 ? "1" : "3×3"}</button>)}</div><Button variant="ghost" className="archive-action-button border border-[#111]" onClick={resetActiveGrid}><RotateCcw className="mr-2 h-4 w-4" />CLEAR</Button></div></div><div className="grid border-t border-[#111] md:grid-cols-[1fr_auto]"><div className="grid gap-3 p-3 sm:grid-cols-2"><div><Label htmlFor="page-title" className="archive-label">TITLE</Label><Input id="page-title" className="archive-input mt-1" value={activePage?.title ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ title: event.target.value })} /></div><div><Label htmlFor="alt-text" className="archive-label">ALT</Label><Textarea id="alt-text" className="archive-input mt-1 min-h-10" value={activePage?.altText ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ altText: event.target.value })} /></div></div><div className="flex border-t border-[#111] md:border-l md:border-t-0"><Button variant="ghost" className="archive-action-button border-r border-[#111]" onClick={deleteActivePage}><Trash2 className="mr-2 h-4 w-4" />DELETE</Button><Button variant="ghost" className="archive-action-button" onClick={downloadDtms}><Download className="mr-2 h-4 w-4" />SAVE</Button></div></div></section>
+          <section className="archive-card order-1 min-w-0 xl:order-2"><div className="archive-section-heading"><span>CANVAS</span><span>{pageInfo(activePage?.kind ?? "manual").title}</span><div className="ml-auto flex gap-1"><Button size="sm" variant="ghost" className={cn("archive-mini-button", tool === "draw" && "bg-[#111] text-white hover:bg-[#111] hover:text-white")} onClick={() => setTool("draw")}><MousePointer2 className="mr-1 h-3.5 w-3.5" />DRAW</Button><Button size="sm" variant="ghost" className={cn("archive-mini-button", tool === "erase" && "bg-[#111] text-white hover:bg-[#111] hover:text-white")} onClick={() => setTool("erase")}><Eraser className="mr-1 h-3.5 w-3.5" />ERASE</Button><Button size="sm" variant="ghost" aria-pressed={showCanvasReference} className={cn("archive-mini-button", showCanvasReference && "bg-[#111] text-white hover:bg-[#111] hover:text-white")} onClick={() => setShowCanvasReference((current) => !current)}><Eye className="mr-1 h-3.5 w-3.5" />REF</Button></div></div><div className="grid gap-3 p-3 2xl:grid-cols-[minmax(0,1fr)_150px]"><div className="border border-[#111] bg-[#f7f7f7] p-3 sm:p-4"><div role="application" aria-label="60 곱하기 40 촉각 점자 격자. 클릭하여 점을 편집합니다." className="tactile-grid mx-auto aspect-[3/2] w-full max-w-[760px] touch-none select-none bg-white p-[2.3%]" onPointerDown={handleGridPointerDown} onPointerMove={handleGridPointerMove} onPointerUp={() => setIsDrawing(false)} onPointerLeave={() => setIsDrawing(false)} onPointerCancel={() => setIsDrawing(false)}>{showCanvasReference && canvasReferenceSource && <span className="tactile-grid-reference" aria-hidden="true"><img src={canvasReferenceSource} alt="" style={{ width: `${100 / canvasReferenceCrop.width}%`, height: `${100 / canvasReferenceCrop.height}%`, left: `-${(canvasReferenceCrop.x / canvasReferenceCrop.width) * 100}%`, top: `-${(canvasReferenceCrop.y / canvasReferenceCrop.height) * 100}%` }} /></span>}{activePage?.grid.map((row, y) => row.map((raised, x) => <span key={`${x}-${y}`} className={cn("dot", raised && "dot-raised")} />))}</div><div className="mt-2 flex justify-between text-[10px] uppercase text-zinc-500"><span>60 × 40</span><span>{activePage ? dotCount(activePage.grid) : 0} dots</span></div></div><div className="flex flex-col gap-3"><div className="border border-[#111] p-2">{sourceImage ? <img className="aspect-[3/2] w-full object-contain" src={sourceImage} alt="업로드한 원본" /> : <div className="grid aspect-[3/2] place-items-center text-[10px] text-zinc-400">NO SOURCE</div>}</div><div className="grid grid-cols-2 gap-1">{[1, 3].map((size) => <button key={size} onClick={() => setBrushSize(size)} className={cn("archive-choice-button", brushSize === size && "bg-[#2f45ff] text-white")}>{size === 1 ? "1" : "3×3"}</button>)}</div><Button variant="ghost" className="archive-action-button border border-[#111]" onClick={resetActiveGrid}><RotateCcw className="mr-2 h-4 w-4" />CLEAR</Button></div></div><div className="grid border-t border-[#111] md:grid-cols-[1fr_auto]"><div className="grid gap-3 p-3 sm:grid-cols-2"><div><Label htmlFor="page-title" className="archive-label">TITLE</Label><Input id="page-title" className="archive-input mt-1" value={activePage?.title ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ title: event.target.value })} /></div><div><Label htmlFor="alt-text" className="archive-label">ALT</Label><Textarea id="alt-text" className="archive-input mt-1 min-h-10" value={activePage?.altText ?? ""} onFocus={recordHistory} onChange={(event) => updateActivePage({ altText: event.target.value })} /></div></div><div className="flex border-t border-[#111] md:border-l md:border-t-0"><Button variant="ghost" className="archive-action-button border-r border-[#111]" onClick={deleteActivePage}><Trash2 className="mr-2 h-4 w-4" />DELETE</Button><Button variant="ghost" className="archive-action-button" onClick={downloadDtms}><Download className="mr-2 h-4 w-4" />SAVE</Button></div></div></section>
 
           <div className="order-3 space-y-4">
-            {activeSourceSet && <section className="archive-card"><div className="archive-section-heading"><span>FOCUS</span><span className="truncate">{activeSourceSet.label}</span></div><FocusPicker source={activeSourceSet.source} crop={activeSourceSet.selectedCrop} onCommit={selectFocusCrop} /></section>}
+            {activeSourceSet && <section className="archive-card"><div className="archive-section-heading"><span>FOCUS</span><span className="truncate">{activeSourceSet.label}</span></div><FocusPicker source={activeSourceSet.source} crop={activeSourceSet.selectedCrop} onCommit={selectFocusCrop} onStatus={setStatus} /></section>}
             <TactileSettingsPanel
               activePage={activePage}
               mode={mode}
@@ -1953,27 +2086,33 @@ function TactileSettingsPanel({ activePage, mode, threshold, simplification, inv
   </aside>;
 }
 
-function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; onCommit: (selection: Pick<FocusOutline, "crop" | "cutout">) => void }) {
+function FocusPicker({ source, crop, onCommit, onStatus }: { source: string; crop: Crop; onCommit: (selection: Pick<FocusOutline, "crop" | "cutout">) => void; onStatus: (message: string) => void }) {
   const pickerRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const maskCanvasRef = useRef<HTMLCanvasElement>(null);
   const brushActiveRef = useRef(false);
+  const frameStartRef = useRef<{ x: number; y: number } | null>(null);
+  const lastPointRef = useRef<{ x: number; y: number } | null>(null);
   const [outline, setOutline] = useState<FocusOutline | null>(null);
   const [candidates, setCandidates] = useState<FocusCandidateSelection[]>([]);
+  const [selectionFrame, setSelectionFrame] = useState<SelectionFrame | null>(null);
   const [selectionId, setSelectionId] = useState(0);
   const [sourceAspect, setSourceAspect] = useState(FOCUS_FRAME_RATIO);
   const [view, setView] = useState<FocusView>("detail");
   const [tool, setTool] = useState<FocusTool>("select");
   const [brushSize, setBrushSize] = useState(12);
   const [brushCursor, setBrushCursor] = useState<{ x: number; y: number } | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
   const imageFrame = useMemo(() => containedImageFrame(sourceAspect, sourceAspect), [sourceAspect]);
   const isBrush = tool === "add" || tool === "erase";
 
   useEffect(() => {
     setOutline(null);
     setCandidates([]);
+    setSelectionFrame(null);
     setTool("select");
     setBrushCursor(null);
+    lastPointRef.current = null;
   }, [source]);
 
   useEffect(() => {
@@ -2012,16 +2151,60 @@ function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; o
 
   function choosePosition(event: React.PointerEvent<HTMLDivElement>) {
     const selected = point(event);
-    const selectedOutline = imageRef.current ? outlineForPoint(imageRef.current, selected) : null;
-    if (selectedOutline) commitSelection(selectedOutline);
+    lastPointRef.current = selected;
+    const selectedOutline = imageRef.current ? outlineForPoint(imageRef.current, selected, selectionFrame) : null;
+    if (selectedOutline) {
+      commitSelection(selectedOutline);
+    } else {
+      onStatus("선택 영역에서 대상을 찾지 못했습니다. FRAME으로 범위를 다시 잡거나 AI CUT을 사용해 주세요.");
+    }
+  }
+
+  function beginFrame(event: React.PointerEvent<HTMLDivElement>) {
+    event.preventDefault();
+    const start = point(event);
+    frameStartRef.current = start;
+    setCandidates([]);
+    setSelectionFrame(normalizeSelectionFrame(start, start));
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* Pointer capture is optional. */ }
+  }
+
+  function moveFrame(event: React.PointerEvent<HTMLDivElement>) {
+    if (!frameStartRef.current) return;
+    setSelectionFrame(normalizeSelectionFrame(frameStartRef.current, point(event)));
+  }
+
+  function finishFrame() {
+    if (!frameStartRef.current) return;
+    frameStartRef.current = null;
+    setTool("select");
+    onStatus("선택 영역 안에서만 대상 분리와 객체 후보 탐색을 실행합니다.");
   }
 
   function openCandidates(event: React.MouseEvent<HTMLButtonElement>) {
     event.preventDefault();
     event.stopPropagation();
-    const nextCandidates = imageRef.current ? focusCandidatesForSource(imageRef.current) : [];
+    const nextCandidates = imageRef.current ? focusCandidatesForSource(imageRef.current, selectionFrame) : [];
     setCandidates(nextCandidates);
     setTool("candidates");
+    onStatus(nextCandidates.length ? `${nextCandidates.length}개 객체 후보를 찾았습니다.` : "선택 영역에서 객체 후보를 찾지 못했습니다. FRAME을 넓히거나 AI CUT을 사용해 주세요.");
+  }
+
+  async function runAiCutout() {
+    const selected = lastPointRef.current ?? (selectionFrame ? { x: selectionFrame.x + selectionFrame.width / 2, y: selectionFrame.y + selectionFrame.height / 2 } : { x: 0.5, y: 0.5 });
+    setAiBusy(true);
+    setCandidates([]);
+    onStatus("AI CUT 모델을 준비하고 선택한 대상을 분리하고 있습니다. 처음 실행에서는 약 37MB를 한 번만 내려받습니다.");
+    try {
+      const aiOutline = await aiOutlineForPoint(source, selected, selectionFrame);
+      if (!aiOutline) throw new Error("AI가 선택 영역에서 유효한 대상을 찾지 못했습니다.");
+      commitSelection(aiOutline);
+      onStatus("AI CUT이 선택한 대상을 분리해 핵심 부위 페이지에 반영했습니다.");
+    } catch (error) {
+      onStatus(error instanceof Error ? `${error.message} FRAME으로 범위를 조정한 뒤 다시 시도해 주세요.` : "AI CUT을 실행할 수 없습니다. 일반 SELECT 또는 수동 ADD/CUT을 사용해 주세요.");
+    } finally {
+      setAiBusy(false);
+    }
   }
 
   function drawBrush(event: React.PointerEvent<HTMLDivElement>) {
@@ -2084,6 +2267,7 @@ function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; o
 
   const points = outline?.points.map(([x, y]) => `${(imageFrame.x + x * imageFrame.width) * 100},${(imageFrame.y + y * imageFrame.height) * 100}`).join(" ") ?? "";
   const brushDiameter = outline && maskCanvasRef.current?.width ? (brushSize / maskCanvasRef.current.width) * imageFrame.width * 200 : 3;
+  const frameStyle = selectionFrame ? { left: `${(imageFrame.x + selectionFrame.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + selectionFrame.y * imageFrame.height) * 100}%`, width: `${selectionFrame.width * imageFrame.width * 100}%`, height: `${selectionFrame.height * imageFrame.height * 100}%` } : undefined;
 
   return (
     <div className="focus-workspace">
@@ -2091,24 +2275,28 @@ function FocusPicker({ source, crop, onCommit }: { source: string; crop: Crop; o
         <button type="button" className={cn("focus-tool-button", view === "silhouette" && "focus-tool-active")} aria-pressed={view === "silhouette"} onPointerDown={(event) => event.stopPropagation()} onClick={() => setView("silhouette")}>SIL</button>
         <button type="button" className={cn("focus-tool-button", view === "detail" && "focus-tool-active")} aria-pressed={view === "detail"} onPointerDown={(event) => event.stopPropagation()} onClick={() => setView("detail")}>DETAIL</button>
         <span className="focus-tool-divider" aria-hidden="true" />
+        <button type="button" className={cn("focus-tool-button", tool === "frame" && "focus-tool-active")} aria-pressed={tool === "frame"} onPointerDown={(event) => event.stopPropagation()} onClick={() => setTool("frame")}><Maximize2 className="mr-1 inline h-3 w-3" />FRAME</button>
         <button type="button" className={cn("focus-tool-button", tool === "select" && "focus-tool-active")} aria-pressed={tool === "select"} onPointerDown={(event) => event.stopPropagation()} onClick={() => { setTool("select"); setCandidates([]); }}>SELECT</button>
+        <button type="button" className="focus-tool-button" disabled={aiBusy} onPointerDown={(event) => event.stopPropagation()} onClick={() => void runAiCutout()}>{aiBusy ? <Loader2 className="mr-1 inline h-3 w-3 animate-spin" /> : <WandSparkles className="mr-1 inline h-3 w-3" />}AI CUT</button>
         <button type="button" className={cn("focus-tool-button", tool === "add" && "focus-tool-active")} aria-pressed={tool === "add"} disabled={!outline} onPointerDown={(event) => event.stopPropagation()} onClick={() => setTool("add")}>ADD</button>
         <button type="button" className={cn("focus-tool-button", tool === "erase" && "focus-tool-active")} aria-pressed={tool === "erase"} disabled={!outline} onPointerDown={(event) => event.stopPropagation()} onClick={() => setTool("erase")}>CUT</button>
         <button type="button" className={cn("focus-tool-button", tool === "candidates" && "focus-tool-active")} onPointerDown={(event) => event.stopPropagation()} onClick={openCandidates}>OBJECTS</button>
+        {selectionFrame && <button type="button" className="focus-tool-button" onPointerDown={(event) => event.stopPropagation()} onClick={() => { setSelectionFrame(null); setCandidates([]); onStatus("선택 영역 제한을 해제했습니다."); }}><X className="mr-1 inline h-3 w-3" />FRAME</button>}
       </div>
       {isBrush && <div className="focus-brush-sizes" role="group" aria-label="마스크 브러시 크기"><button type="button" className={cn("focus-tool-button", brushSize === 7 && "focus-tool-active")} onClick={() => setBrushSize(7)}>S</button><button type="button" className={cn("focus-tool-button", brushSize === 12 && "focus-tool-active")} onClick={() => setBrushSize(12)}>M</button><button type="button" className={cn("focus-tool-button", brushSize === 20 && "focus-tool-active")} onClick={() => setBrushSize(20)}>L</button></div>}
-      <div ref={pickerRef} role="button" tabIndex={0} aria-label="원본에서 확대할 대상을 클릭하면 대상의 외곽선이 선택되고 촉각 캔버스가 갱신됩니다." data-view={view} data-tool={tool} className={cn("focus-picker focus-frame relative w-full overflow-hidden", isBrush ? "cursor-none" : "cursor-crosshair")} style={{ aspectRatio: sourceAspect }} onPointerDown={(event) => { if (tool === "select") choosePosition(event); else if (isBrush) beginBrush(event); }} onPointerMove={(event) => { if (isBrush) { if (brushActiveRef.current) drawBrush(event); else setBrushCursor(point(event)); } }} onPointerUp={finishBrush} onPointerLeave={() => { if (!brushActiveRef.current) setBrushCursor(null); }} onPointerCancel={finishBrush} onKeyDown={(event) => { if ((event.key === "Enter" || event.key === " ") && tool === "select") choosePosition({ currentTarget: event.currentTarget, clientX: event.currentTarget.getBoundingClientRect().left + event.currentTarget.getBoundingClientRect().width / 2, clientY: event.currentTarget.getBoundingClientRect().top + event.currentTarget.getBoundingClientRect().height / 2 } as React.PointerEvent<HTMLDivElement>); }}>
+      <div ref={pickerRef} role="button" tabIndex={0} aria-label="FRAME으로 대상 주변을 드래그한 다음 SELECT로 대상 객체를 클릭하거나 AI CUT으로 마스크를 생성합니다." data-view={view} data-tool={tool} className={cn("focus-picker focus-frame relative w-full overflow-hidden", isBrush ? "cursor-none" : tool === "frame" ? "cursor-crosshair" : "cursor-crosshair")} style={{ aspectRatio: sourceAspect }} onPointerDown={(event) => { if (tool === "select") choosePosition(event); else if (tool === "frame") beginFrame(event); else if (isBrush) beginBrush(event); }} onPointerMove={(event) => { if (tool === "frame") moveFrame(event); else if (isBrush) { if (brushActiveRef.current) drawBrush(event); else setBrushCursor(point(event)); } }} onPointerUp={() => { if (tool === "frame") finishFrame(); else finishBrush(); }} onPointerLeave={() => { if (!brushActiveRef.current) setBrushCursor(null); }} onPointerCancel={() => { finishFrame(); finishBrush(); }} onKeyDown={(event) => { if ((event.key === "Enter" || event.key === " ") && tool === "select") choosePosition({ currentTarget: event.currentTarget, clientX: event.currentTarget.getBoundingClientRect().left + event.currentTarget.getBoundingClientRect().width / 2, clientY: event.currentTarget.getBoundingClientRect().top + event.currentTarget.getBoundingClientRect().height / 2 } as React.PointerEvent<HTMLDivElement>); }}>
         <div className="absolute relative overflow-hidden bg-white" style={{ left: `${imageFrame.x * 100}%`, top: `${imageFrame.y * 100}%`, width: `${imageFrame.width * 100}%`, height: `${imageFrame.height * 100}%` }}>
           <img ref={imageRef} className={cn("h-full w-full select-none object-contain transition-opacity duration-200", outline && view === "silhouette" && "focus-source-muted")} src={source} alt="핵심 부위 선택용 원본 이미지" draggable={false} onLoad={inspectImage} />
           {outline && view === "silhouette" && <canvas ref={maskCanvasRef} className="pointer-events-none absolute inset-0 h-full w-full select-none focus-cutout-preview" aria-hidden="true" />}
         </div>
+        {selectionFrame && <div className="focus-selection-frame pointer-events-none absolute z-20" style={frameStyle}><span>AREA</span></div>}
         {outline && <svg key={selectionId} className="pointer-events-none absolute inset-0 z-10 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><polygon className="focus-object-outline" points={points} /></svg>}
-        {candidates.length > 0 && <svg className="absolute inset-0 z-20 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label={`${candidates.length}개의 객체 후보`}><title>분리된 객체 후보</title>{candidates.map((candidate, index) => { const candidatePoints = candidate.points.map(([x, y]) => `${(imageFrame.x + x * imageFrame.width) * 100},${(imageFrame.y + y * imageFrame.height) * 100}`).join(" "); return <polygon key={candidate.id} className="focus-candidate-outline" points={candidatePoints} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); commitSelection(candidate); }} />; })}</svg>}
+        {candidates.length > 0 && <svg className="absolute inset-0 z-20 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label={`${candidates.length}개의 객체 후보`}><title>분리된 객체 후보</title>{candidates.map((candidate) => { const candidatePoints = candidate.points.map(([x, y]) => `${(imageFrame.x + x * imageFrame.width) * 100},${(imageFrame.y + y * imageFrame.height) * 100}`).join(" "); return <polygon key={candidate.id} className="focus-candidate-outline" points={candidatePoints} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); commitSelection(candidate); }} />; })}</svg>}
         {candidates.map((candidate, index) => <button key={`label-${candidate.id}`} type="button" className="focus-candidate-label absolute z-30" style={{ left: `${(imageFrame.x + candidate.crop.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + candidate.crop.y * imageFrame.height) * 100}%` }} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); commitSelection(candidate); }}>{String(index + 1).padStart(2, "0")}</button>)}
         {outline && <span key={`label-${selectionId}`} className="focus-object-label pointer-events-none absolute z-30 px-1.5 py-1 text-[9px] font-medium text-[#333]" style={{ left: `${(imageFrame.x + outline.crop.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + outline.crop.y * imageFrame.height) * 100}%` }}>CUTOUT</span>}
         {isBrush && brushCursor && <span className="focus-brush-cursor pointer-events-none absolute z-40" style={{ left: `${(imageFrame.x + brushCursor.x * imageFrame.width) * 100}%`, top: `${(imageFrame.y + brushCursor.y * imageFrame.height) * 100}%`, width: `${brushDiameter}%`, aspectRatio: "1", transform: "translate(-50%, -50%)" }} />}
       </div>
-      {tool === "candidates" && <p className="focus-tool-status" aria-live="polite">{candidates.length ? `${candidates.length} OBJECTS — 하나를 선택` : "객체 후보를 찾지 못했습니다. SELECT로 직접 선택하거나 CUT으로 경계를 분리하세요."}</p>}
+      {tool === "candidates" && <p className="focus-tool-status" aria-live="polite">{candidates.length ? `${candidates.length} OBJECTS — 하나를 선택` : "객체 후보를 찾지 못했습니다. FRAME을 다시 잡거나 AI CUT을 사용해 주세요."}</p>}
     </div>
   );
 }
